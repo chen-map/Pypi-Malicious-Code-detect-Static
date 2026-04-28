@@ -1,0 +1,81 @@
+{
+  "critical": {
+    "description": "严重危险操作 - 可能导致代码执行或系统控制",
+    "patterns": [
+      {
+        "name": "code_execution",
+        "patterns": ["exec(", "eval(", "compile("],
+        "description": "动态代码执行"
+      },
+      {
+        "name": "command_execution",
+        "patterns": ["os.system", "subprocess.", "popen", "call(", "check_output", "run(", "Popen"],
+        "description": "命令执行"
+      },
+      {
+        "name": "unsafe_deserialization",
+        "patterns": ["pickle.loads", "pickle.load(", "marshal.loads", "shelve.open", "yaml.load", "yaml.unsafe_load"],
+        "description": "不安全的反序列化"
+      }
+    ]
+  },
+  "high": {
+    "description": "高风险操作 - 可能导致信息泄露或数据篡改",
+    "patterns": [
+      {
+        "name": "crypto_operation",
+        "patterns": ["base64.", "binascii.", "decode(", "encode(", "cipher", "decrypt", "encrypt", "hashlib"],
+        "description": "加密/编码操作"
+      },
+      {
+        "name": "network_request",
+        "patterns": ["urllib.", "requests.", "http.", "socket.", "httpx", "aiohttp", "ftplib", "smtp"],
+        "description": "网络请求"
+      },
+      {
+        "name": "file_code_operation",
+        "patterns": ["open(", "read(", "write("],
+        "context": ["eval", "exec", "code"],
+        "description": "文件操作配合代码执行"
+      },
+      {
+        "name": "dynamic_import",
+        "patterns": ["__import__", "importlib.", "imp.", "getattr(__builtins__", "import_module"],
+        "description": "动态导入"
+      }
+    ]
+  },
+  "medium": {
+    "description": "中风险操作 - 需要进一步审查",
+    "patterns": [
+      {
+        "name": "dangerous_import",
+        "patterns": ["subprocess", "pickle", "marshal", "shelve", "urllib", "requests", "http", "socket", "ssl", "ctypes"],
+        "is_import": true,
+        "description": "危险模块导入"
+      },
+      {
+        "name": "environment_access",
+        "patterns": ["os.environ", "sys.argv", "getenv"],
+        "description": "环境变量访问"
+      }
+    ]
+  },
+  "custom_rules": {
+    "description": "自定义检测规则 - 支持正则表达式",
+    "rules": [
+      {
+        "severity": "critical",
+        "name": "obfuscated_code",
+        "regex": "\\b_[a-zA-Z_]{20,}\\s*\\(",
+        "description": "可疑的混淆函数调用"
+      },
+      {
+        "severity": "high",
+        "name": "hex_string_decode",
+        "regex": "\\bbytes\\.fromhex\\s*\\(|chr\\(.*\\)\\s*\\+\\s*chr\\(",
+        "description": "十六进制字符串解码"
+      }
+    ]
+  }
+}
