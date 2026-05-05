@@ -1,0 +1,180 @@
+{
+  "critical": {
+    "description": "严重危险操作 - 可能导致代码执行或系统控制",
+    "patterns": [
+      {
+        "name": "code_execution",
+        "patterns": ["exec(", "eval(", "compile("],
+        "description": "动态代码执行"
+      },
+      {
+        "name": "command_execution",
+        "patterns": ["os.system", "subprocess.", "popen", "call(", "check_output", "run(", "Popen"],
+        "description": "命令执行"
+      },
+      {
+        "name": "unsafe_deserialization",
+        "patterns": ["pickle.loads", "pickle.load(", "marshal.loads", "shelve.open", "yaml.load", "yaml.unsafe_load"],
+        "description": "不安全的反序列化"
+      },
+      {
+        "name": "remote_code_execution",
+        "patterns": ["requests.get(", "urllib.request.urlopen(", "urllib.request.Request(", "httpx.get(", "aiohttp.get("],
+        "context": ["exec", "eval", "compile"],
+        "description": "远程代码下载并执行"
+      },
+      {
+        "name": "dns_canary",
+        "patterns": ["socket.gethostbyname(", "socket.getaddrinfo(", "socket.getfqdn("],
+        "description": "DNS Canary攻击（供应链攻击信号检测）"
+      }
+    ]
+  },
+  "high": {
+    "description": "高风险操作 - 可能导致信息泄露或数据篡改",
+    "patterns": [
+      {
+        "name": "crypto_operation",
+        "patterns": ["base64.", "binascii.", "decode(", "encode(", "cipher", "decrypt", "encrypt", "hashlib", "b64decode", "b64encode", "standard_b64decode"],
+        "description": "加密/编码操作"
+      },
+      {
+        "name": "advanced_encryption",
+        "patterns": ["fernet", "cryptography.", "pycryptodome", "pycrypto", "aes", "rsa", "des.", "rc4"],
+        "description": "高级加密库（Fernet, AES, RSA等）"
+      },
+      {
+        "name": "network_request",
+        "patterns": ["urllib.", "requests.", "http.", "socket.", "httpx", "aiohttp", "ftplib", "smtp"],
+        "description": "网络请求"
+      },
+      {
+        "name": "file_code_operation",
+        "patterns": ["open(", "read(", "write("],
+        "context": ["eval", "exec", "code"],
+        "description": "文件操作配合代码执行"
+      },
+      {
+        "name": "dynamic_import",
+        "patterns": ["__import__", "importlib.", "imp.", "getattr(__builtins__", "import_module"],
+        "description": "动态导入"
+      },
+      {
+        "name": "obfuscation_framework",
+        "patterns": ["hyperion", "pyarmor", "pyminifier", "python-obfuscator", "obfuscate.", "pytransform."],
+        "description": "代码混淆框架"
+      }
+    ]
+  },
+  "medium": {
+    "description": "中风险操作 - 需要进一步审查",
+    "patterns": [
+      {
+        "name": "dangerous_import",
+        "patterns": ["subprocess", "pickle", "marshal", "shelve", "urllib", "requests", "http", "socket", "ssl", "ctypes"],
+        "is_import": true,
+        "description": "危险模块导入"
+      },
+      {
+        "name": "environment_access",
+        "patterns": ["os.environ", "sys.argv", "getenv"],
+        "description": "环境变量访问"
+      }
+    ]
+  },
+  "custom_rules": {
+    "description": "自定义检测规则 - 支持正则表达式",
+    "rules": [
+      {
+        "severity": "critical",
+        "name": "obfuscated_code",
+        "regex": "\\b[a-zA-Z_][a-zA-Z0-9_]{19,}\\s*\\(",
+        "description": "可疑的混淆函数调用（20+字符标识符）"
+      },
+      {
+        "severity": "critical",
+        "name": "fernet_decrypt_exec",
+        "regex": "\\bFernet\\(\\s*[\"']?b?[\"']?.+[\"']?\\s*\\)\\.decrypt\\(\\s*[\"']?b?[\"']?.+[\"']?\\s*\\)",
+        "description": "Fernet解密并执行（oenesea攻击模式）"
+      },
+      {
+        "severity": "critical",
+        "name": "exec_download_combo",
+        "regex": "\\b(exec|eval|compile)\\s*\\(\\s*(requests\\.|urllib\\.|httpx\\.).*\\.get\\(",
+        "description": "代码执行+网络下载组合（远程代码执行）"
+      },
+      {
+        "severity": "high",
+        "name": "hex_string_decode",
+        "regex": "\\bbytes\\.fromhex\\s*\\(|chr\\(.*\\)\\s*\\+\\s*chr\\(",
+        "description": "十六进制字符串解码"
+      },
+      {
+        "severity": "high",
+        "name": "base64_exec_combo",
+        "regex": "\\b(base64\\.(b64decode|standard_b64decode|decode64)|binascii\\.)\\s*\\([^)]+\\)\\s*\\)",
+        "description": "Base64解码后执行"
+      },
+      {
+        "severity": "high",
+        "name": "hyperion_obfuscator",
+        "regex": "__obfuscator__\\s*=\\s*[\"'][\\w]+[\"']|__authors__\\s*=\\s*[\"']billythegoat356",
+        "description": "Hyperion混淆框架特征（pydisk攻击模式）"
+      },
+      {
+        "severity": "high",
+        "name": "large_compressed_blob",
+        "regex": "b\\'[x-zA-Z0-9+/=]{100,,}",
+        "description": "大型压缩二进制块（可能是恶意payload）"
+      },
+      {
+        "severity": "high",
+        "name": "custom_install_command",
+        "regex": "cmdclass\\s*=\\s*\\{\\s*[\"']install[\"']\\s*:",
+        "description": "自定义install命令（可能在install时执行恶意代码）"
+      },
+      {
+        "severity": "critical",
+        "name": "powershell_encoded_command",
+        "regex": "\\b(subprocess\\.Popen|os\\.system|os\\.popen)\\s*\\(\\s*['\"]powershell\\s+-WindowStyle\\s+Hidden\\s+-EncodedCommand",
+        "description": "PowerShell隐藏编码命令攻击"
+      },
+      {
+        "severity": "high",
+        "name": "hidden_powershell",
+        "regex": "\\b(subprocess\\.Popen|os\\.system|os\\.popen)\\s*\\(\\s*['\"]powershell\\s+-WindowStyle\\s+Hidden",
+        "description": "PowerShell隐藏窗口攻击"
+      },
+      {
+        "severity": "high",
+        "name": "encoded_command",
+        "regex": "-EncodedCommand\\s+[a-zA-Z0-9+/=]{20,}",
+        "description": "编码命令参数"
+      },
+      {
+        "severity": "medium",
+        "name": "canary_domain",
+        "regex": "\\b[a-z0-9]{20,}\\.(canarytokens\\.com|burpcollaborator\\.net|interact\\.sh|oast\\.me|request-catcher)",
+        "description": "DNS Canary域名检测"
+      },
+      {
+        "severity": "medium",
+        "name": "suspicious_user_agent",
+        "regex": "User-Agent\\s*:\\s*[\"'].*(?:curl|wget|python-requests|powershell).*[\"']",
+        "description": "可疑的User-Agent字符串"
+      },
+      {
+        "severity": "medium",
+        "name": "discord_webhook",
+        "regex": "discord\\.com/api/webhooks",
+        "description": "Discord Webhook URL（可能用于数据外泄）"
+      },
+      {
+        "severity": "medium",
+        "name": "paste_site_download",
+        "regex": "(pastebin\\.com|paste\\.ee|justpaste\\.it|dpaste\\.com|funcaptcha\\.ru/paste)",
+        "description": "从paste站点下载代码（可疑）"
+      }
+    ]
+  }
+}

