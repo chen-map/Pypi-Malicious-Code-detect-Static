@@ -549,6 +549,52 @@ import traceback
 from pathlib import Path
 
 # ========================================
+# 0. 依赖管理：自动安装缺失的第三方库
+# ========================================
+def auto_install_dependencies():
+    """自动检测并安装缺失的依赖"""
+    import subprocess
+
+    # 常见恶意软件依赖映射
+    DEPENDENCY_MAP = {{
+        "Crypto": "pycryptodome",
+        "cryptography": "cryptography",
+        "requests": "requests",
+        "numpy": "numpy",
+        "pandas": "pandas",
+        "PIL": "Pillow",
+        "Pillow": "Pillow",
+        "urllib3": "urllib3",
+        "certifi": "certifi",
+    }}
+
+    installed_count = 0
+
+    for module_name, package_name in DEPENDENCY_MAP.items():
+        try:
+            __import__(module_name)
+        except ImportError:
+            print(f"[INFO] Installing missing dependency: {{package_name}} (for {{module_name}})")
+            try:
+                subprocess.check_call([
+                    sys.executable, "-m", "pip", "install",
+                    package_name, "-q", "--no-warn-script-location"
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                print(f"[OK] Successfully installed: {{package_name}}")
+                installed_count += 1
+            except Exception as e:
+                print(f"[WARN] Failed to install {{package_name}}: {{e}}")
+
+    if installed_count > 0:
+        print(f"[INFO] Installed {{installed_count}} dependencies")
+
+# 执行自动安装
+try:
+    auto_install_dependencies()
+except Exception as e:
+    print(f"[WARN] Dependency installation failed: {{e}}")
+
+# ========================================
 # 1. 环境设置：把原包当作库
 # ========================================
 try:
