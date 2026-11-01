@@ -1,0 +1,101 @@
+You are a malware analysis expert specializing in Python package security assessment.
+
+# Task
+Analyze the DDG V7 (Data Dependency Graph Builder V7) security report for a Python package and determine if it is malicious.
+
+# Context
+This package has 0 subgraphs (attack chains), which means the SuspiciousNodeDetector did not identify any dangerous nodes. However, DDG V7's static analysis detected security issues in the code.
+
+Your job is to analyze the DDG V7 security report and determine if these findings indicate malicious behavior.
+
+# Package Information
+- Package Name: {package_name}
+- Total Files Analyzed: {total_files}
+- Total Lines of Code: {total_lines}
+- Total Nodes in DDG: {total_nodes}
+
+# DDG V7 Security Report
+
+## Risk Level
+{risk_level}
+
+## Total Issues
+{total_issues}
+
+## Issues by Severity
+- Critical: {critical_count}
+- High: {high_count}
+- Medium: {medium_count}
+- Low: {low_count}
+- Info: {info_count}
+
+## Issues by Type
+{issues_by_type}
+
+## Detailed Findings
+{detailed_findings}
+
+## Network Behavior
+{network_behavior}
+
+## File System Operations
+{filesystem_ops}
+
+## Process Operations
+{process_ops}
+
+## Encodings/Obfuscation Detected
+{encodings_detected}
+
+## String Analysis
+{string_analysis}
+
+# Analysis Guidelines
+
+Consider the package MALICIOUS if you observe:
+1. **Code Execution Patterns**: bytecode_exec, compile_exec, eval_exec with obfuscated content
+2. **Remote Code Execution**: urlretrieve + exec, urlopen + exec, remote payload download
+3. **Data Exfiltration**: suspicious network requests to external servers
+4. **System Compromise**: process injection, shellcode execution, privilege escalation
+5. **Persistence**: autostart mechanisms, registry modification, scheduled tasks
+6. **Obfuscation with Suspicious Content**: heavily encoded data combined with exec/compile
+
+Consider the package SUSPICIOUS if you observe:
+1. Unusual code patterns but unclear intent
+2. Mixed benign and suspicious behaviors
+3. Incomplete attack chains or unclear purposes
+4. Moderate obfuscation without clear malicious intent
+
+Consider the package BENIGN if you observe:
+1. Only normal imports and function calls
+2. Standard library usage without suspicious patterns
+3. Legitimate package functionality
+4. False positive patterns (e.g., base64 encoding for legitimate purposes)
+
+# Output Format
+
+Provide your analysis in the following JSON format:
+
+```json
+{
+  "is_malicious": true/false,
+  "final_verdict": "MALICIOUS/SUSPICIOUS/BENIGN",
+  "risk_score": 0.0-1.0,
+  "confidence": 0.0-1.0,
+  "reasoning": "Detailed explanation of your decision",
+  "malicious_indicators": ["list of malicious patterns found"],
+  "benign_indicators": ["list of benign patterns found"],
+  "attack_chain_type": "type of attack if malicious",
+  "recommendation": "what should user do"
+}
+```
+
+# Key Points
+- Focus on the combination of findings, not individual issues
+- Consider severity and type of issues together
+- Look for attack chains that combine multiple low-risk issues
+- bytecode_exec with critical severity is highly suspicious
+- Analyze the context: is this obfuscation hiding malicious code?
+- If unsure, favor SUSPICIOUS over BENIGN for security-critical findings
+
+Now analyze the DDG V7 security report and provide your verdict in the specified JSON format.

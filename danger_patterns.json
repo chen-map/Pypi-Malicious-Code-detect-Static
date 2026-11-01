@@ -1,0 +1,1316 @@
+{
+  "critical": {
+    "description": "严重危险操作 - 可能导致代码执行或系统控制",
+    "patterns": [
+      {
+        "name": "code_execution",
+        "patterns": ["exec(", "eval(", "compile("],
+        "description": "动态代码执行"
+      },
+      {
+        "name": "command_execution",
+        "patterns": ["os.system", "subprocess.", "popen", "call(", "check_output", "run(", "Popen"],
+        "description": "命令执行"
+      },
+      {
+        "name": "unsafe_deserialization",
+        "patterns": ["pickle.loads", "pickle.load(", "marshal.loads", "shelve.open", "yaml.load", "yaml.unsafe_load"],
+        "description": "不安全的反序列化"
+      },
+      {
+        "name": "remote_code_execution",
+        "patterns": ["requests.get(", "urllib.request.urlopen(", "urllib.request.Request(", "httpx.get(", "aiohttp.get("],
+        "context": ["exec", "eval", "compile"],
+        "description": "远程代码下载并执行"
+      },
+      {
+        "name": "dns_canary",
+        "patterns": ["socket.gethostbyname(", "socket.getaddrinfo(", "socket.getfqdn("],
+        "description": "DNS Canary攻击（供应链攻击信号检测）"
+      },
+      {
+        "name": "credential_decryption",
+        "patterns": ["win32crypt.CryptUnprotectData", "CryptUnprotectData", "win32crypt."],
+        "description": "Windows凭据解密（窃取Saved Passwords、Tokens等）"
+      }
+    ]
+  },
+  "high": {
+    "description": "高风险操作 - 可能导致信息泄露或数据篡改",
+    "patterns": [
+      {
+        "name": "crypto_operation",
+        "patterns": ["base64.", "binascii.", "decode(", "encode(", "cipher", "decrypt", "encrypt", "hashlib", "b64decode", "b64encode", "standard_b64decode"],
+        "description": "加密/编码操作"
+      },
+      {
+        "name": "advanced_encryption",
+        "patterns": ["fernet", "cryptography.", "pycryptodome", "pycrypto", "aes", "rsa", "des.", "rc4"],
+        "description": "高级加密库（Fernet, AES, RSA等）"
+      },
+      {
+        "name": "network_request",
+        "patterns": ["urllib.", "requests.", "http.", "socket.", "httpx", "aiohttp", "ftplib", "smtp"],
+        "description": "网络请求"
+      },
+      {
+        "name": "file_code_operation",
+        "patterns": ["open(", "read(", "write("],
+        "context": ["eval", "exec", "code"],
+        "description": "文件操作配合代码执行"
+      },
+      {
+        "name": "dynamic_import",
+        "patterns": ["__import__", "importlib.", "imp.", "getattr(__builtins__", "import_module"],
+        "description": "动态导入"
+      },
+      {
+        "name": "windows_api",
+        "patterns": ["win32api.", "win32com.", "win32crypt.", "pywin32", "ctypes."],
+        "description": "Windows API调用（可能与系统攻击相关）"
+      },
+      {
+        "name": "python2_commands",
+        "patterns": ["commands."],
+        "description": "Python 2 commands模块（已过时但仍可用于命令执行）"
+      },
+      {
+        "name": "obfuscation_framework",
+        "patterns": ["hyperion", "pyarmor", "pyminifier", "python-obfuscator", "obfuscate.", "pytransform."],
+        "description": "代码混淆框架"
+      },
+      {
+        "name": "credential_theft_paths",
+        "patterns": ["Local State", "Login Data", "Cookies", "leveldb", "tokenPaths", "browser_loc", "LOCALAPPDATA", "APPDATA"],
+        "description": "凭据窃取路径（Discord Token、浏览器密码、Cookies等）"
+      },
+      {
+        "name": "sqlite3_database",
+        "patterns": ["sqlite3.connect", "sqlite3\\.connect", "copy2(", "shutil.copy"],
+        "context": ["Login Data", "Cookies", "History"],
+        "description": "SQLite数据库操作（窃取浏览器凭据）"
+      }
+    ]
+  },
+  "medium": {
+    "description": "中风险操作 - 需要进一步审查",
+    "patterns": [
+      {
+        "name": "dangerous_import",
+        "patterns": ["subprocess", "pickle", "marshal", "shelve", "urllib", "requests", "http", "socket", "ssl", "ctypes", "win32crypt", "pycryptodome", "cryptography", "Cryptodome", "commands"],
+        "is_import": true,
+        "description": "危险模块导入"
+      },
+      {
+        "name": "environment_access",
+        "patterns": ["os.environ", "sys.argv", "getenv"],
+        "description": "环境变量访问"
+      }
+    ]
+  },
+  "custom_rules": {
+    "description": "自定义检测规则 - 支持正则表达式",
+    "rules": [
+      {
+        "severity": "critical",
+        "name": "obfuscated_code",
+        "regex": "\\b[a-zA-Z_][a-zA-Z0-9_]{19,}\\s*\\(",
+        "description": "可疑的混淆函数调用（20+字符标识符）"
+      },
+      {
+        "severity": "critical",
+        "name": "fernet_decrypt_exec",
+        "regex": "\\bFernet\\(\\s*[\"']?b?[\"']?.+[\"']?\\s*\\)\\.decrypt\\(\\s*[\"']?b?[\"']?.+[\"']?\\s*\\)",
+        "description": "Fernet解密并执行（oenesea攻击模式）"
+      },
+      {
+        "severity": "critical",
+        "name": "exec_download_combo",
+        "regex": "\\b(exec|eval|compile)\\s*\\(\\s*(requests\\.|urllib\\.|httpx\\.).*\\.get\\(",
+        "description": "代码执行+网络下载组合（远程代码执行）"
+      },
+      {
+        "severity": "high",
+        "name": "hex_string_decode",
+        "regex": "\\bbytes\\.fromhex\\s*\\(|chr\\(.*\\)\\s*\\+\\s*chr\\(",
+        "description": "十六进制字符串解码"
+      },
+      {
+        "severity": "high",
+        "name": "base64_exec_combo",
+        "regex": "\\b(base64\\.(b64decode|standard_b64decode|decode64)|binascii\\.)\\s*\\([^)]+\\)\\s*\\)",
+        "description": "Base64解码后执行"
+      },
+      {
+        "severity": "high",
+        "name": "hyperion_obfuscator",
+        "regex": "__obfuscator__\\s*=\\s*[\"'][\\w]+[\"']|__authors__\\s*=\\s*[\"']billythegoat356",
+        "description": "Hyperion混淆框架特征（pydisk攻击模式）"
+      },
+      {
+        "severity": "high",
+        "name": "large_compressed_blob",
+        "regex": "b\\'[x-zA-Z0-9+/=]{100,,}",
+        "description": "大型压缩二进制块（可能是恶意payload）"
+      },
+      {
+        "severity": "high",
+        "name": "custom_install_command",
+        "regex": "cmdclass\\s*=\\s*\\{\\s*[\"']install[\"']\\s*:",
+        "description": "自定义install命令（可能在install时执行恶意代码）"
+      },
+      {
+        "severity": "critical",
+        "name": "powershell_encoded_command",
+        "regex": "\\b(subprocess\\.Popen|os\\.system|os\\.popen)\\s*\\(\\s*['\"]powershell\\s+-WindowStyle\\s+Hidden\\s+-EncodedCommand",
+        "description": "PowerShell隐藏编码命令攻击"
+      },
+      {
+        "severity": "high",
+        "name": "hidden_powershell",
+        "regex": "\\b(subprocess\\.Popen|os\\.system|os\\.popen)\\s*\\(\\s*['\"]powershell\\s+-WindowStyle\\s+Hidden",
+        "description": "PowerShell隐藏窗口攻击"
+      },
+      {
+        "severity": "high",
+        "name": "encoded_command",
+        "regex": "-EncodedCommand\\s+[a-zA-Z0-9+/=]{20,}",
+        "description": "编码命令参数"
+      },
+      {
+        "severity": "medium",
+        "name": "canary_domain",
+        "regex": "\\b[a-z0-9]{20,}\\.(canarytokens\\.com|burpcollaborator\\.net|interact\\.sh|oast\\.me|request-catcher)",
+        "description": "DNS Canary域名检测"
+      },
+      {
+        "severity": "medium",
+        "name": "suspicious_user_agent",
+        "regex": "User-Agent\\s*:\\s*[\"'].*(?:curl|wget|python-requests|powershell).*[\"']",
+        "description": "可疑的User-Agent字符串"
+      },
+      {
+        "severity": "medium",
+        "name": "discord_webhook",
+        "regex": "discord\\.com/api/webhooks",
+        "description": "Discord Webhook URL（可能用于数据外泄）"
+      },
+      {
+        "severity": "medium",
+        "name": "paste_site_download",
+        "regex": "(pastebin\\.com|paste\\.ee|justpaste\\.it|dpaste\\.com|funcaptcha\\.ru/paste)",
+        "description": "从paste站点下载代码（可疑）"
+      },
+      {
+        "severity": "critical",
+        "name": "windows_credential_decryption_chain",
+        "regex": "win32crypt\\.(CryptUnprotectData|CryptProtectData).*\\n.*requests\\.post|import win32crypt.*\\n.*requests\\.post",
+        "description": "Windows凭据解密+数据外传组合攻击链"
+      },
+      {
+        "severity": "critical",
+        "name": "browser_credential_theft",
+        "regex": "(Login Data|Cookies|Local State).*\\n.*sqlite3\\.(connect|open).*\\n.*win32crypt",
+        "description": "浏览器凭据窃取（读取数据库+解密）"
+      },
+      {
+        "severity": "high",
+        "name": "discord_token_theft",
+        "regex": "(discord|Discord|DiscordCanary|discordptb).*\\n.*leveldb.*\\n.*(dQw4w9WgXcQ|token|base64)",
+        "description": "Discord Token窃取模式"
+      },
+      {
+        "severity": "high",
+        "name": "cryptodome_aes_usage",
+        "regex": "from Cryptodome\\.Cipher import AES|Cryptodome\\.Cipher\\.AES",
+        "description": "Cryptodome AES加密/解密（可能与凭据窃取相关）"
+      },
+      {
+        "severity": "high",
+        "name": "dropbox_exfiltration",
+        "regex": "dropbox\\.Dropbox\\s*\\(\\s*['\"][A-Za-z0-9_-]{50,}",
+        "description": "Dropbox API使用（可能用于数据外传）"
+      },
+      {
+        "severity": "medium",
+        "name": "obfuscated_import_chain",
+        "regex": "__import__\\([^)]+\\)\\.(exec|eval|compile)\\s*\\(\\s*__import__",
+        "description": "多层__import__混淆链"
+      },
+      {
+        "severity": "critical",
+        "name": "reverse_shell",
+        "regex": "socket\\.socket.*\\.connect.*os\\.dup2.*subprocess\\.Popen\\s*\\(\\s*['\"]sh",
+        "description": "反向Shell连接（socket+dup2+shell）"
+      },
+      {
+        "severity": "high",
+        "name": "bind_shell",
+        "regex": "socket\\.socket.*\\.bind.*\\.listen.*\\.accept.*subprocess\\.Popen",
+        "description": "绑定Shell（监听端口+exec shell）"
+      },
+      {
+        "severity": "critical",
+        "name": "telegram_bot_exfil",
+        "regex": "bot\\.send_message.*chat_id.*[\\\"']https?:\\/",
+        "description": "Telegram Bot数据外泄（发送URL/文件）"
+      },
+      {
+        "severity": "high",
+        "name": "github_gist_exfil",
+        "regex": "github\\.com/gist/|gist\\.githubusercontent\\.com.*token|api_key",
+        "description": "GitHub Gist数据外泄"
+      },
+      {
+        "severity": "high",
+        "name": "bitcoin_wallet_theft",
+        "regex": "wallet\\.dat|bitcoin.*wallet|btc.*wallet|private_key.*bitcoin",
+        "description": "比特币钱包窃取"
+      },
+      {
+        "severity": "high",
+        "name": "ethereum_wallet_theft",
+        "regex": "keystore|UTC/.*JSON|ethereum.*wallet|eth.*private.*key",
+        "description": "以太坊钱包窃取（Keystore文件）"
+      },
+      {
+        "severity": "critical",
+        "name": "clipboard_hijack",
+        "regex": "win32clipboard\\.GetClipboardData|pyperclip\\.paste.*clipboard.*bitcoin|clipboard.*private.*key",
+        "description": "剪贴板劫持（窃取加密货币地址）"
+      },
+      {
+        "severity": "high",
+        "name": "firefox_credential_theft",
+        "regex": "logins\\.json|key4\\.db|places\\.sqlite.*firefox",
+        "description": "Firefox凭据窃取"
+      },
+      {
+        "severity": "high",
+        "name": "chrome_credential_theft",
+        "regex": "Chrome.*User Data.*Login Data|Local State.*encrypted_key",
+        "description": "Chrome凭据窃取（跨平台）"
+      },
+      {
+        "severity": "medium",
+        "name": "vm_detection",
+        "regex": "vmware|virtualbox|qemu|vbox|virtual.*machine|hypervisor",
+        "description": "虚拟机检测（反沙箱）"
+      },
+      {
+        "severity": "medium",
+        "name": "sandbox_detection",
+        "regex": "sandbox|analysis|malware|detect|debugger|wireshark|fiddler|process\\.monitor",
+        "description": "沙箱/分析环境检测"
+      },
+      {
+        "severity": "medium",
+        "name": "debugger_detection",
+        "regex": "ptrace|pyautogui.*debug|isdebugged|check_debugger",
+        "description": "调试器检测"
+      },
+      {
+        "severity": "critical",
+        "name": "ransomware_pattern",
+        "regex": "walk.*\\.(encrypt|lock|crypt).*\\..*\\.(pdf|doc|jpg|png|mp4|zip|sql|db)|file.*encrypt.*file",
+        "description": "勒索软件模式（遍历加密文件）"
+      },
+      {
+        "severity": "high",
+        "name": "file_wipe",
+        "regex": "shred|sdelete|cipher.*\\/w|os\\.remove.*\\\\.\\.|overwrite.*delete",
+        "description": "安全删除文件（反取证）"
+      },
+      {
+        "severity": "critical",
+        "name": "mbr_destruction",
+        "regex": "\\\\.\\\\PhysicalDrive|\\\\Device\\\\Harddisk.*write|boot.*sector|mbr.*write",
+        "description": "MBR破坏（直接写硬盘）"
+      },
+      {
+        "severity": "high",
+        "name": "keylogger",
+        "regex": "keyboard\\.hook|pynput.*keyboard.*press|GetAsyncKeyState|GetKeyState",
+        "description": "键盘记录（键盘钩子）"
+      },
+      {
+        "severity": "high",
+        "name": "screenshot",
+        "regex": "ImageGrab.*screenshot|pyautogui.*screenshot|mss.*screenshot|win32gui.*GetWindowDC.*BitBlt",
+        "description": "屏幕截图（窃取敏感信息）"
+      },
+      {
+        "severity": "medium",
+        "name": "camera_hack",
+        "regex": "cv2\\.VideoCapture.*0|webcam|camera.*open|pygame.*camera",
+        "description": "摄像头入侵"
+      },
+      {
+        "severity": "high",
+        "name": "persistence_registry",
+        "regex": "win32reg.*OpenKey.*SetValueEx.*HKEY_LOCAL_MACHINE.*Software.*Microsoft.*Windows.*CurrentVersion.*Run",
+        "description": "Windows注册表持久化"
+      },
+      {
+        "severity": "medium",
+        "name": "persistence_cron",
+        "regex": "crontab.*\\/etc\\/crontab|cron.*hourly.*systemd",
+        "description": "Linux Cron持久化"
+      },
+      {
+        "severity": "medium",
+        "name": "persistence_launchd",
+        "regex": "LaunchAgents|LaunchDaemons.*~/Library",
+        "description": "macOS launchd持久化"
+      },
+      {
+        "severity": "critical",
+        "name": "dns_tunneling",
+        "regex": "socket.*sendto.*53.*\\.\\d+|dns.*tunnel|dns.*exfiltration",
+        "description": "DNS隧道（数据外传）"
+      },
+      {
+        "severity": "medium",
+        "name": "icmp_tunneling",
+        "regex": "ICMP.*tunnel|ping.*tunnel|IPPROTO_ICMP.*data",
+        "description": "ICMP隧道"
+      },
+      {
+        "severity": "high",
+        "name": "crypto_miner",
+        "regex": "mining.*pool|stratum.*tcp|cryptonight|monero.*mine|cpu.*mine.*thread",
+        "description": "加密货币挖矿"
+      },
+      {
+        "severity": "medium",
+        "name": "proxy_pivot",
+        "regex": "proxy.*chain|pivot.*point|socks.*proxy|http.*proxy.*tunnel",
+        "description": "代理跳板（内网穿透）"
+      },
+      {
+        "severity": "critical",
+        "name": "process_injection",
+        "regex": "WriteProcessMemory.*VirtualAllocEx.*CreateRemoteThread|CreateRemoteThread.*injection",
+        "description": "进程注入（Windows）"
+      },
+      {
+        "severity": "high",
+        "name": "process_hollowing",
+        "regex": "NtUnmapViewOfSection|NtMapViewOfSection.*ProcessHollowing",
+        "description": "Process Hollowing（进程镂空）"
+      },
+      {
+        "severity": "medium",
+        "name": "dll_injection",
+        "regex": "LoadLibrary.*inject|dll.*injection|SetWindowsHookEx",
+        "description": "DLL注入"
+      },
+      {
+        "severity": "high",
+        "name": "lateral_movement",
+        "regex": "psexec.*exec|wmi.*exec|smb.*exec|atexec|wmic.*process",
+        "description": "横向移动（内网渗透）"
+      },
+      {
+        "severity": "critical",
+        "name": "uac_bypass",
+        "regex": "fodhelper.*uac|eventvwr.*bypass|registry.*uac.*bypass|comhijack.*uac",
+        "description": "UAC绕过"
+      },
+      {
+        "severity": "high",
+        "name": "privilege_escalation",
+        "regex": "token.*duplication|impersonate|exploit.*privilege|kernel.*exploit",
+        "description": "权限提升"
+      },
+      {
+        "severity": "medium",
+        "name": "aws_creds",
+        "regex": "\\.aws\\/credentials|aws_access_key_id|aws_secret_access_key|~\\.aws",
+        "description": "AWS凭证窃取"
+      },
+      {
+        "severity": "medium",
+        "name": "docker_escape",
+        "regex": "docker.sock|\\/cgroup|\\/proc\\/1\\/cgroup|container.*escape",
+        "description": "Docker容器逃逸"
+      },
+      {
+        "severity": "high",
+        "name": "cloud_metadata",
+        "regex": "169\\.254\\.169\\.254|metadata\\.service|instance.*metadata",
+        "description": "云实例元数据窃取（AWS/GCP/Azure）"
+      },
+      {
+        "severity": "medium",
+        "name": "k8s_api",
+        "regex": "kubernetes\\.default\\.svc|serviceaccount\\/token|kubeconfig",
+        "description": "Kubernetes API访问"
+      },
+      {
+        "severity": "critical",
+        "name": "rootkit",
+        "regex": "rootkit|kernel.*hook|inline.*hook|syscall.*hook",
+        "description": "Rootkit（内核级后门）"
+      },
+      {
+        "severity": "high",
+        "name": "backdoor_pattern",
+        "regex": "back.*door|bind.*shell|reverse.*shell|netcat.*nc|nc.*\\-e.*\\/bin",
+        "description": "后门模式"
+      },
+      {
+        "severity": "medium",
+        "name": "steganography",
+        "regex": "steganography|lsb.*hide|image.*hide|data.*hide.*image",
+        "description": "隐写术（数据隐藏）"
+      },
+      {
+        "severity": "high",
+        "name": "memory_scanning",
+        "regex": "readprocessmemory.*scan|memory.*scan.*password|process.*memory.*dump",
+        "description": "内存扫描（窃取内存中的密码）"
+      },
+      {
+        "severity": "medium",
+        "name": "password_spray",
+        "regex": "password.*spray|brute.*force.*login|credential.*stuffing",
+        "description": "密码喷洒/凭证填充"
+      },
+      {
+        "severity": "high",
+        "name": "arp_spoofing",
+        "regex": "arp.*spoof|scapy.*arp|mitm.*arp|gateway.*spoof",
+        "description": "ARP欺骗（中间人攻击）"
+      },
+      {
+        "severity": "medium",
+        "name": "smtp_exfil",
+        "regex": "smtplib.*sendmail|smtp.*send.*attachment|email.*exfil",
+        "description": "SMTP数据外泄"
+      },
+      {
+        "severity": "high",
+        "name": "ftp_exfil",
+        "regex": "ftplib.*stor|ftp.*upload.*exfil|ftp.*send.*file",
+        "description": "FTP数据外泄"
+      },
+      {
+        "severity": "critical",
+        "name": "pyro_serialized",
+        "regex": "pyro.*PickleSerializer|Pyro4.*pickle|URI.*pickle.*PyRO",
+        "description": "Pyro反序列化RCE"
+      },
+      {
+        "severity": "high",
+        "name": "yaml_load",
+        "regex": "yaml\\.load\\(|yaml\\.unsafe_load\\(|yaml\\.load_all\\(",
+        "description": "YAML不安全加载（反序列化）"
+      },
+      {
+        "severity": "medium",
+        "name": "jsonp_hijack",
+        "regex": "callback.*json|jsonp.*callback|for.*\\..*script.*src",
+        "description": "JSONP劫持"
+      },
+      {
+        "severity": "critical",
+        "name": "ssrf",
+        "regex": "request.*url.*metadata|request.*url.*local|request.*url.*file|169\\.254.*curl",
+        "description": "SSRF攻击（服务端请求伪造）"
+      },
+      {
+        "severity": "high",
+        "name": "xxe",
+        "regex": "xml.*parse|etree.*fromstring|lxml.*parse|ENTITY.*SYSTEM",
+        "description": "XXE注入（XML外部实体）"
+      },
+      {
+        "severity": "medium",
+        "name": "template_injection",
+        "regex": "jinja2.*template|mako.*template|render.*string.*eval",
+        "description": "模板注入（SSTI）"
+      },
+      {
+        "severity": "high",
+        "name": "deserialization_attack",
+        "regex": "pickle.*loads|marshal.*loads|shelve.*open|yaml.*load|xml.*parse.*external",
+        "description": "反序列化攻击（综合检测）"
+      },
+      {
+        "severity": "medium",
+        "name": "ldap_injection",
+        "regex": "ldap.*search.*filter|ldap.*bind.*\\*|ldap.*injection",
+        "description": "LDAP注入"
+      },
+      {
+        "severity": "medium",
+        "name": "xpath_injection",
+        "regex": "xpath.*\\[|xpath.*concat|xpath.*or.*1.*=.*1",
+        "description": "XPath注入"
+      },
+      {
+        "severity": "critical",
+        "name": "sql_injection",
+        "regex": "execute.*\\'.*or.*1.*=.*1|query.*\\'.*union.*select|raw.*sql.*format|cursor.*execute.*\\+.*sql",
+        "description": "SQL注入（动态拼接SQL）"
+      },
+      {
+        "severity": "high",
+        "name": "command_injection_os",
+        "regex": "os\\.system.*\\+.*input|subprocess.*call.*shell.*True|Popen.*shell.*True.*\\+",
+        "description": "命令注入（通过变量拼接）"
+      },
+      {
+        "severity": "medium",
+        "name": "path_traversal",
+        "regex": "\\.\\.\\/|\\.\\.\\\\|%2e%2e|path.*traversal|file.*\\.\\.",
+        "description": "路径遍历"
+      },
+      {
+        "severity": "high",
+        "name": "race_condition",
+        "regex": "toctou|time.*of.*check.*time.*use|race.*condition.*check.*use",
+        "description": "竞态条件（TOCTOU）"
+      },
+      {
+        "severity": "medium",
+        "name": "buffer_overflow_prep",
+        "regex": "struct\\.pack.*buffer|ctypes.*buffer.*overflow|create_string_buffer",
+        "description": "缓冲区溢出准备（创建大buffer）"
+      },
+      {
+        "severity": "high",
+        "name": "evil_telemetry",
+        "regex": "telemetry.*send|analytics.*http.*post|tracking.*exfil",
+        "description": "恶意遥测（伪装成分析/遥测的数据外泄）"
+      },
+      {
+        "severity": "medium",
+        "name": "sid_hijack",
+        "regex": "DuplicateTokenEx|ImpersonateLoggedOnUser|sid.*hijack",
+        "description": "SID劫持"
+      },
+      {
+        "severity": "high",
+        "name": "pass_the_hash",
+        "regex": "pass.*hash|hash.*pass|ntlm.*hash.*auth|wmi.*hash.*auth",
+        "description": "Pass-the-Hash攻击"
+      },
+      {
+        "severity": "critical",
+        "name": "credential_dumping",
+        "regex": "mimikatz|sekurlsa|lsadump|cachedump|cred.*dump|hash.*dump",
+        "description": "凭据转储（mimikatz等）"
+      },
+      {
+        "severity": "high",
+        "name": "ssh_key_theft",
+        "regex": "\\.ssh.*id_rsa|ssh.*private.*key|authorized_keys.*exfil",
+        "description": "SSH私钥窃取"
+      },
+      {
+        "severity": "medium",
+        "name": "vpn_creds",
+        "regex": "\\.vpn|vpn.*config|openvpn.*credentials|vpn.*password",
+        "description": "VPN凭据窃取"
+      },
+      {
+        "severity": "high",
+        "name": "database_exfil",
+        "regex": "mysqldump.*\\.\\.\\.|pg_dump.*\\.\\.|sql.*dump.*exfil|database.*backup.*exfil",
+        "description": "数据库转储外泄"
+      },
+      {
+        "severity": "medium",
+        "name": "source_code_leak",
+        "regex": "\\.py.*exfil|source.*code.*upload|\\.git.*upload|\\.env.*upload",
+        "description": "源代码泄露（上传源代码文件）"
+      },
+      {
+        "severity": "high",
+        "name": "wiretapping",
+        "regex": "scapy.*sniff|pcap.*sniff|socket.*sniff|packet.*capture",
+        "description": "网络嗅探（窃取网络流量）"
+      },
+      {
+        "severity": "medium",
+        "name": "session_hijack",
+        "regex": "cookie.*steal|session.*steal|token.*steal|jwt.*decode",
+        "description": "会话劫持"
+      },
+      {
+        "severity": "critical",
+        "name": "rce_automation",
+        "regex": "ansible.*playbook.*shell|salt.*cmd.*exec|puppet.*exec|chef.*execute",
+        "description": "通过自动化工具RCE"
+      },
+      {
+        "severity": "high",
+        "name": "webshell_upload",
+        "regex": "upload.*\\.php|eval.*\\$_POST|eval.*\\$_GET|system.*\\$_REQUEST",
+        "description": "Webshell上传（虽然PHP但可能通过Python上传）"
+      },
+      {
+        "severity": "medium",
+        "name": "password_reuse_check",
+        "regex": "password.*check|credential.*check|hash.*check.*database",
+        "description": "密码重用检测（可能用于撞库攻击）"
+      },
+      {
+        "severity": "high",
+        "name": "crypto_jacking",
+        "regex": "coinhive|jsexcrypt|crypto.*loot|browser.*mine|javascript.*miner",
+        "description": "加密货币劫持（浏览器挖矿）"
+      },
+      {
+        "severity": "medium",
+        "name": "fake_update",
+        "regex": "update.*exe|fake.*update|malicious.*update|update.*download|software.*updater",
+        "description": "虚假更新（恶意软件伪装成更新）"
+      },
+      {
+        "severity": "critical",
+        "name": "wiper_destruction",
+        "regex": "wiper|disk.*wiper|data.*destruction|mass.*delete|file.*corrupt",
+        "description": "数据擦除器（破坏性恶意软件）"
+      },
+      {
+        "severity": "high",
+        "name": "ransomware_payment",
+        "regex": "ransomware|bitcoin.*payment|pay.*decrypt|your.*files.*encrypted|send.*bitcoin",
+        "description": "勒索软件支付要求"
+      },
+      {
+        "severity": "medium",
+        "name": "dga_domain_generation",
+        "regex": "random.*string.*domain|domain.*generate|dga.*algorithm",
+        "description": "DGA域名生成（C2通信）"
+      },
+      {
+        "severity": "high",
+        "name": "fast_flux",
+        "regex": "fast.*flux|ttl.*60|rapid.*dns.*change|dns.*change.*fast",
+        "description": "Fast Flux网络（快速切换IP的C2）"
+      },
+      {
+        "severity": "medium",
+        "name": "domain_fronting",
+        "regex": "domain.*fronting|cdn.*front|host.*header.*spoof",
+        "description": "Domain Fronting（隐藏C2流量）"
+      },
+      {
+        "severity": "critical",
+        "name": "supply_chain_compromise",
+        "regex": "pip.*install.*editable|setup.*py.*install|python.*setup.*install|package.*install.*hook",
+        "description": "供应链攻击（在安装时执行）"
+      },
+      {
+        "severity": "high",
+        "name": "typosquatting",
+        "regex": "goggle\\.com|facebok\\.com|pyjom|requets|urllib3\\.com.*malicious",
+        "description": "Typosquatting（域名欺骗）"
+      },
+      {
+        "severity": "medium",
+        "name": "polyglot_attack",
+        "regex": "polyglot|multipart.*magic.*bytes|file.*magic.*multiple",
+        "description": "多态文件（可被多种格式解析的恶意文件）"
+      },
+      {
+        "severity": "high",
+        "name": "fileless_malware",
+        "regex": "memory.*execute.*file|fileless.*execute|powershell.*encoded.*|reflection.*invoke",
+        "description": "无文件恶意软件（直接在内存执行）"
+      },
+      {
+        "severity": "medium",
+        "name": "living_off_land",
+        "regex": "lolbas|lolbin|living.*off.*land|trusted.*binary.*abuse",
+        "description": "Living off the Land（滥用合法工具）"
+      },
+      {
+        "severity": "high",
+        "name": "python_rce_common",
+        "regex": "eval\\(input\\(|exec\\(input\\(|compile\\(input\\(|__import__\\(input\\(",
+        "description": "Python常见RCE模式（eval/exec+input）"
+      },
+      {
+        "severity": "critical",
+        "name": "deserialization_chain",
+        "regex": "base64.*pickle|pickle.*base64|eval.*marshal|marshal.*eval",
+        "description": "反序列化链（多层编码+反序列化）"
+      },
+      {
+        "severity": "high",
+        "name": "obfuscated_import_string",
+        "regex": "__import__\\s*\\(\\s*chr\\(|__import__\\s*\\(\\s*\\+.*join|__import__\\s*\\(\\s*\\*.*join",
+        "description": "混淆的__import__（使用chr/join构造模块名）"
+      },
+      {
+        "severity": "medium",
+        "name": "ast_manipulation",
+        "regex": "ast\\.Literal|compile.*ast.*exec|exec.*compile.*ast",
+        "description": "AST操作（动态修改AST）"
+      },
+      {
+        "severity": "high",
+        "name": "code_obj_manipulation",
+        "regex": "Code.*object|exec.*code.*object|compile.*code.*object",
+        "description": "代码对象操作（动态生成/执行code对象）"
+      },
+      {
+        "severity": "medium",
+        "name": "import_hook",
+        "regex": "sys\\.meta_path|import.*hook|ImportHook|MetaPathFinder",
+        "description": "导入钩子（劫持import机制）"
+      },
+      {
+        "severity": "critical",
+        "name": "metaclass_abuse",
+        "regex": "class.*metaclass.*exec|__metaclass__.*eval|type.*exec|metaclass.*danger",
+        "description": "元类滥用（在类创建时执行恶意代码）"
+      },
+      {
+        "severity": "high",
+        "name": "property_abuse",
+        "regex": "@property.*exec|@property.*eval|getter.*danger|setter.*malicious",
+        "description": "属性装饰器滥用（在访问属性时执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "destructor_abuse",
+        "regex": "__del__.*exec|__del__.*eval|__delattr__.*malicious",
+        "description": "析构函数滥用（对象销毁时执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "magic_method_abuse",
+        "regex": "__call__.*exec|__getattr__.*eval|__setattr__.*danger|__getattribute__.*exec",
+        "description": "魔术方法滥用（重载特殊方法执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "descriptor_abuse",
+        "regex": "__get__.*exec|__set__.*eval|descriptor.*danger",
+        "description": "描述符滥用（通过描述符协议执行代码）"
+      },
+      {
+        "severity": "critical",
+        "name": "operator_overload_exec",
+        "regex": "__add__.*exec|__sub__.*eval|__mul__.*compile|operator.*overload.*danger",
+        "description": "运算符重载滥用（重载操作符执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "context_manager_abuse",
+        "regex": "__enter__.*exec|__exit__.*eval|context.*manager.*danger",
+        "description": "上下文管理器滥用（with语句执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "iterator_abuse",
+        "regex": "__iter__.*exec|__next__.*eval|iterator.*danger",
+        "description": "迭代器滥用（迭代时执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "decorator_abuse",
+        "regex": "@.*exec|@.*eval|@.*compile|decorator.*malicious|wrapper.*danger",
+        "description": "装饰器滥用（函数调用时自动执行恶意代码）"
+      },
+      {
+        "severity": "critical",
+        "name": "subclass_hook_abuse",
+        "regex": "__init_subclass__.*exec|__init_subclass__.*eval|__create_subclass__.*danger",
+        "description": "子类钩子滥用（创建子类时执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "global_hook_abuse",
+        "regex": "globals\\(\\).*exec|locals\\(\\).*eval|__builtins__.*danger",
+        "description": "全局变量钩子滥用"
+      },
+      {
+        "severity": "high",
+        "name": "module_reload_abuse",
+        "regex": "importlib\\.reload.*exec|reload.*eval|imp\\.reload.*danger",
+        "description": "模块重载滥用（重新加载时执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "weakref_abuse",
+        "regex": "weakref.*callback.*exec|finalize.*eval|weakref.*danger",
+        "description": "弱引用滥用（对象回收时执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "thread_abuse",
+        "regex": "Thread.*target.*exec|threading.*Thread.*eval|thread.*malicious",
+        "description": "线程滥用（新线程执行恶意代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "signal_handler_abuse",
+        "regex": "signal.*handler.*exec|SIG.*handler.*eval|signal.*danger",
+        "description": "信号处理程序滥用（信号触发时执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "atexit_abuse",
+        "regex": "atexit\\.register.*exec|atexit\\.register.*eval|atexit.*malicious",
+        "description": "atexit滥用（程序退出时执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "gc_hook_abuse",
+        "regex": "gc\\.callbacks.*exec|gc\\.collect.*eval|garbage.*collect.*danger",
+        "description": "垃圾回收钩子滥用（GC时执行代码）"
+      },
+      {
+        "severity": "critical",
+        "name": "sys_modules_abuse",
+        "regex": "sys\\.modules\\[.*\\].*=.*exec|sys\\.modules.*__import__|sys\\.modules.*danger",
+        "description": "sys.modules滥用（注入恶意模块）"
+      },
+      {
+        "severity": "high",
+        "name": "builtins_override",
+        "regex": "__builtins__\\[.*\\].*=.*exec|__builtins__.*eval|__builtins__.*danger",
+        "description": "覆盖__builtins__（替换内置函数）"
+      },
+      {
+        "severity": "medium",
+        "name": "getattr_hook_abuse",
+        "regex": "__getattr__.*exec|__getattribute__.*eval|getattr.*hook.*danger",
+        "description": "getattr钩子滥用（访问属性时执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "setattr_injection",
+        "regex": "setattr.*exec|setattr.*eval|setattr.*danger|object.*setattr.*malicious",
+        "description": "setattr注入（设置属性时执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "hasattr_abuse",
+        "regex": "hasattr.*exec|hasattr.*eval|hasattr.*danger|trigger.*hasattr",
+        "description": "hasattr滥用（检查属性时触发代码）"
+      },
+      {
+        "severity": "critical",
+        "name": "bytes_decode_exec",
+        "regex": "bytes.*decode.*exec|str.*decode.*eval|decode.*\\('.*exec",
+        "description": "bytes解码后执行"
+      },
+      {
+        "severity": "high",
+        "name": "format_exec",
+        "regex": "format.*exec|%s.*exec|%r.*eval|string.*format.*danger",
+        "description": "format字符串执行（通过格式化执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "template_exec_jinja",
+        "regex": "Template.*exec|jinja.*Template.*eval|render.*template.*danger",
+        "description": "模板渲染执行（通过模板引擎执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "pickle_opcode_abuse",
+        "regex": "pickle.*REDUCE|pickle.*GLOBAL|pickle.*INST|pickle.*OBJ.*exec",
+        "description": "Pickle操作码滥用（利用Pickle opcode执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "shelve_bypass",
+        "regex": "shelve.*open.*exec|shelve.*dbm.*danger|dbm.*danger",
+        "description": "Shelve绕过（通过shelve执行代码）"
+      },
+      {
+        "severity": "critical",
+        "name": "multipart_encoder_abuse",
+        "regex": "multipart.*encode|email.*mime.*exec|mime.*multipart.*danger",
+        "description": "MIME编码滥用（通过邮件MIME执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "itertools_abuse",
+        "regex": "itertools.*cycle.*exec|itertools.*chain.*eval|itertools.*danger",
+        "description": "itertools滥用（通过迭代器执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "functools_abuse",
+        "regex": "functools.*partial.*exec|functools.*reduce.*eval|functools.*danger",
+        "description": "functools滥用（通过高阶函数执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "operator_abuse",
+        "regex": "operator.*methodcaller.*exec|operator.*itemgetter.*eval|operator.*danger",
+        "description": "operator模块滥用（通过operator执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "collections_abuse",
+        "regex": "collections.*ChainMap.*exec|collections.*OrderedDict.*eval|collections.*danger",
+        "description": "collections模块滥用（通过集合类型执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "typing_abuse",
+        "regex": "typing.*exec|typing.*eval|typing.*danger|type.*hint.*abuse",
+        "description": "typing模块滥用（通过类型提示执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "dataclass_abuse",
+        "regex": "@dataclass.*exec|dataclass.*eval|dataclass.*danger|__post_init__.*malicious",
+        "description": "dataclass滥用（通过dataclass执行代码）"
+      },
+      {
+        "severity": "critical",
+        "name": "enum_abuse",
+        "regex": "Enum.*exec|enum.*eval|enum.*danger|_value_.*malicious",
+        "description": "枚举滥用（通过Enum执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "namedtuple_abuse",
+        "regex": "namedtuple.*exec|collections.*namedtuple.*eval|namedtuple.*danger",
+        "description": "namedtuple滥用（通过namedtuple执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "asyncio_abuse",
+        "regex": "asyncio.*run.*exec|asyncio.*create_task.*eval|asyncio.*danger",
+        "description": "asyncio滥用（通过异步执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "concurrent_abuse",
+        "regex": "concurrent.*futures.*exec|ThreadPoolExecutor.*eval|ProcessPoolExecutor.*danger",
+        "description": "concurrent模块滥用（通过线程池/进程池执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "multiprocessing_abuse",
+        "regex": "multiprocessing.*Process.*exec|multiprocessing.*Pool.*eval|multiprocessing.*danger",
+        "description": "multiprocessing滥用（通过多进程执行代码）"
+      },
+      {
+        "severity": "critical",
+        "name": "logging_abuse",
+        "regex": "logging.*handler.*exec|logging.*Formatter.*eval|logging.*danger",
+        "description": "logging模块滥用（通过日志记录执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "configparser_abuse",
+        "regex": "ConfigParser.*exec|configparser.*eval|config.*file.*danger",
+        "description": "ConfigParser滥用（通过配置文件执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "argparse_abuse",
+        "regex": "argparse.*exec|ArgumentParser.*eval|argparse.*danger",
+        "description": "argparse滥用（通过参数解析执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "pathlib_abuse",
+        "regex": "pathlib.*Path.*exec|pathlib.*PurePath.*eval|pathlib.*danger",
+        "description": "pathlib滥用（通过路径操作执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "secrets_abuse",
+        "regex": "secrets.*exec|secrets.*eval|secrets.*danger|token.*url.*exec",
+        "description": "secrets模块滥用（通过令牌生成执行代码）"
+      },
+      {
+        "severity": "critical",
+        "name": "hashlib_abuse",
+        "regex": "hashlib.*sha256.*exec|hashlib.*md5.*eval|hash.*digest.*danger",
+        "description": "hashlib滥用（通过哈希操作执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "random_abuse",
+        "regex": "random.*exec|random.*eval|random.*seed.*danger|random.*choice.*malicious",
+        "description": "random模块滥用（通过随机操作执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "uuid_abuse",
+        "regex": "uuid.*exec|uuid.*eval|uuid.*danger|uuid.*node.*malicious",
+        "description": "uuid模块滥用（通过UUID操作执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "datetime_abuse",
+        "regex": "datetime.*exec|datetime.*eval|datetime.*danger|timedelta.*malicious",
+        "description": "datetime模块滥用（通过日期时间执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "json_abuse",
+        "regex": "json.*loads.*exec|json.*load.*eval|json.*decoder.*danger",
+        "description": "json模块滥用（通过JSON解析执行代码）"
+      },
+      {
+        "severity": "critical",
+        "name": "csv_abuse",
+        "regex": "csv.*reader.*exec|csv.*writer.*eval|csv.*danger",
+        "description": "csv模块滥用（通过CSV处理执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "xml_abuse",
+        "regex": "xml.*parse.*exec|xml.*etree.*eval|ElementTree.*danger",
+        "description": "xml模块滥用（通过XML解析执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "html_abuse",
+        "regex": "html.*parse.*exec|html.*unescape.*eval|html.*danger",
+        "description": "html模块滥用（通过HTML解析执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "urllib_abuse",
+        "regex": "urllib.*exec|urllib.*eval|urllib.*request.*danger|urllib.*parse.*malicious",
+        "description": "urllib模块滥用（通过URL操作执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "http_abuse",
+        "regex": "http.*client.*exec|http.*server.*eval|http.*cookies.*danger",
+        "description": "http模块滥用（通过HTTP操作执行代码）"
+      },
+      {
+        "severity": "critical",
+        "name": "socket_abuse",
+        "regex": "socket.*exec|socket.*eval|socket.*danger|socket.*connect.*malicious",
+        "description": "socket模块滥用（通过网络套接字执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "ssl_abuse",
+        "regex": "ssl.*exec|ssl.*eval|ssl.*danger|ssl.*wrap_socket.*malicious",
+        "description": "ssl模块滥用（通过SSL操作执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "email_abuse",
+        "regex": "email.*exec|email.*eval|email.*parser.*danger|email.*message.*malicious",
+        "description": "email模块滥用（通过邮件处理执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "mimetypes_abuse",
+        "regex": "mimetypes.*exec|mimetypes.*eval|mimetypes.*danger|mimetype.*malicious",
+        "description": "mimetypes模块滥用（通过MIME类型执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "base64_abuse",
+        "regex": "base64.*b64decode.*exec|base64.*standard_b64decode.*eval|base64.*danger",
+        "description": "base64模块滥用（通过编码解码执行代码）"
+      },
+      {
+        "severity": "critical",
+        "name": "binascii_abuse",
+        "regex": "binascii.*exec|binascii.*eval|binascii.*danger|binascii.*a2b.*malicious",
+        "description": "binascii模块滥用（通过二进制ASCII转换执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "quopri_abuse",
+        "regex": "quopri.*exec|quopri.*eval|quopri.*danger|quoted.*printable.*malicious",
+        "description": "quopri模块滥用（通过quoted-printable执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "uu_abuse",
+        "regex": "uu.*exec|uu.*eval|uu.*danger|uuencode.*malicious",
+        "description": "uu模块滥用（通过uuencode执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "bz2_abuse",
+        "regex": "bz2.*decompress.*exec|bz2.*decompress.*eval|bz2.*danger",
+        "description": "bz2模块滥用（通过bzip2解压执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "lzma_abuse",
+        "regex": "lzma.*decompress.*exec|lzma.*decompress.*eval|lzma.*danger",
+        "description": "lzma模块滥用（通过LZMA解压执行代码）"
+      },
+      {
+        "severity": "critical",
+        "name": "zipfile_abuse",
+        "regex": "zipfile.*extract.*exec|zipfile.*ZipFile.*eval|zipfile.*danger",
+        "description": "zipfile模块滥用（通过ZIP处理执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "tarfile_abuse",
+        "regex": "tarfile.*extract.*exec|tarfile.*TarFile.*eval|tarfile.*danger",
+        "description": "tarfile模块滥用（通过tar处理执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "gzip_abuse",
+        "regex": "gzip.*decompress.*exec|gzip.*GzipFile.*eval|gzip.*danger",
+        "description": "gzip模块滥用（通过gzip处理执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "tempfile_abuse",
+        "regex": "tempfile.*exec|tempfile.*eval|tempfile.*danger|tempfile.*mkstemp.*malicious",
+        "description": "tempfile模块滥用（通过临时文件执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "shutil_abuse",
+        "regex": "shutil.*exec|shutil.*eval|shutil.*danger|shutil.*copy.*malicious",
+        "description": "shutil模块滥用（通过文件操作执行代码）"
+      },
+      {
+        "severity": "critical",
+        "name": "os_abuse",
+        "regex": "os.*exec|os.*eval|os.*danger|os.*system.*malicious|os.*popen.*exec",
+        "description": "os模块滥用（通过操作系统操作执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "sys_abuse",
+        "regex": "sys.*exec|sys.*eval|sys.*danger|sys.*argv.*malicious|sys.*path.*exec",
+        "description": "sys模块滥用（通过系统参数执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "platform_abuse",
+        "regex": "platform.*exec|platform.*eval|platform.*danger|platform.*uname.*malicious",
+        "description": "platform模块滥用（通过平台信息执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "getpass_abuse",
+        "regex": "getpass.*exec|getpass.*eval|getpass.*danger|getpass.*getpass.*malicious",
+        "description": "getpass模块滥用（通过密码输入执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "curses_abuse",
+        "regex": "curses.*exec|curses.*eval|curses.*danger|curses.*wrapper.*malicious",
+        "description": "curses模块滥用（通过终端操作执行代码）"
+      },
+      {
+        "severity": "critical",
+        "name": "readline_abuse",
+        "regex": "readline.*exec|readline.*eval|readline.*danger|readline.*parse.*malicious",
+        "description": "readline模块滥用（通过读取行执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "rlcompleter_abuse",
+        "regex": "rlcompleter.*exec|rlcompleter.*eval|rlcompleter.*danger|rlcompleter.*Completer.*malicious",
+        "description": "rlcompleter模块滥用（通过自动补全执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "tty_abuse",
+        "regex": "tty.*exec|tty.*eval|tty.*danger|tty.*setraw.*malicious",
+        "description": "tty模块滥用（通过终端操作执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "pty_abuse",
+        "regex": "pty.*exec|pty.*eval|pty.*danger|pty.*spawn.*malicious",
+        "description": "pty模块滥用（通过伪终端执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "fcntl_abuse",
+        "regex": "fcntl.*exec|fcntl.*eval|fcntl.*danger|fcntl.*ioctl.*malicious",
+        "description": "fcntl模块滥用（通过文件控制执行代码）"
+      },
+      {
+        "severity": "critical",
+        "name": "resource_abuse",
+        "regex": "resource.*exec|resource.*eval|resource.*danger|resource.*getrlimit.*malicious",
+        "description": "resource模块滥用（通过资源限制执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "pwd_abuse",
+        "regex": "pwd.*exec|pwd.*eval|pwd.*danger|pwd.*getpwnam.*malicious",
+        "description": "pwd模块滥用（通过密码数据库执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "grp_abuse",
+        "regex": "grp.*exec|grp.*eval|grp.*danger|grp.*getgrnam.*malicious",
+        "description": "grp模块滥用（通过组数据库执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "spwd_abuse",
+        "regex": "spwd.*exec|spwd.*eval|spwd.*danger|spwd.*getspnam.*malicious",
+        "description": "spwd模块滥用（通过shadow密码执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "crypt_abuse",
+        "regex": "crypt.*exec|crypt.*eval|crypt.*danger|crypt.*crypt.*malicious",
+        "description": "crypt模块滥用（通过密码哈希执行代码）"
+      },
+      {
+        "severity": "critical",
+        "name": "termios_abuse",
+        "regex": "termios.*exec|termios.*eval|termios.*danger|termios.*tcgetattr.*malicious",
+        "description": "termios模块滥用（通过终端控制执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "signal_abuse",
+        "regex": "signal.*exec|signal.*eval|signal.*danger|signal.*alarm.*malicious",
+        "description": "signal模块滥用（通过信号处理执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "mmap_abuse",
+        "regex": "mmap.*exec|mmap.*eval|mmap.*danger|mmap.*mmap.*malicious",
+        "description": "mmap模块滥用（通过内存映射执行代码）"
+      },
+      {
+        "severity": "critical",
+        "name": "msvcrt_abuse",
+        "regex": "msvcrt.*exec|msvcrt.*eval|msvcrt.*danger|msvcrt.*malloc.*malicious",
+        "description": "msvcrt模块滥用（通过MS运行时执行代码）"
+      },
+      {
+        "severity": "high",
+        "name": "winsound_abuse",
+        "regex": "winsound.*exec|winsound.*eval|winsound.*danger|winsound.*Beep.*malicious",
+        "description": "winsound模块滥用（通过Windows声音执行代码）"
+      },
+      {
+        "severity": "medium",
+        "name": "winreg_abuse",
+        "regex": "winreg.*exec|winreg.*eval|winreg.*danger|winreg.*OpenKey.*malicious",
+        "description": "winreg模块滥用（通过注册表执行代码）"
+      },
+      {
+        "severity": "critical",
+        "name": "pywin32_abuse",
+        "regex": "pywin32.*exec|pywin32.*eval|pywin32.*danger|pywin32.*win32gui.*malicious",
+        "description": "pywin32模块滥用（通过Windows API执行代码）"
+      }
+    ]
+  }
+}
