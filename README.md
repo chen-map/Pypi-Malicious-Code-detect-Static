@@ -1,189 +1,348 @@
-# NEW_DDG — PyPI Malicious Package Detection System
+<div align="center">
 
-> **v2.0 大幅重构版** — 相比 v1.0，重写了图内核、新增了四条检测通道、升级了 LLM 层、修复了 20+ 个 bug。详见下方 [v2.0 修改说明](#v20-修改说明)。
+# 🛡️ NEW_DDG
 
-Multi-signal static analysis system for PyPI malicious packages.
-Combines **interprocedural taint analysis** (CFG+CG+DDG), **function summaries**,
-**LLM-assisted verification**, and **registry-level checks** across four independent
-detection channels.
+**Multi-Signal Interprocedural Taint Analysis for PyPI Malicious Package Detection**
 
-## Quick Start
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-46%2B%20passing-brightgreen.svg)](tests/)
+[![LLM: GLM](https://img.shields.io/badge/LLM-GLM--4--FlashX-blueviolet)](https://open.bigmodel.cn/)
+[![Detection: 4 Channels](https://img.shields.io/badge/channels-4%20independent-red)](#architecture)
+
+*Interprocedural taint analysis · Function summaries · AST-resolved call targets · LLM-assisted verification*
+
+</div>
+
+---
+
+## 📖 Overview
+
+**NEW_DDG** detects malicious packages on PyPI by combining four independent detection
+channels — regex-based enhanced detection, AST-level obfuscation analysis, interprocedural
+taint analysis over a three-layer code property graph, and LLM-assisted semantic verification.
+
+Unlike single-channel tools (Guarddog, Bandit4Mal) that rely on pattern matching,
+NEW_DDG builds a **Code Property Graph (CPG-lite)** with three abstraction layers and
+propagates taint through **function boundaries, cross-file call chains, and dynamic
+dispatch targets** — detecting attacks that pattern-matching tools miss.
+
+### Why another tool?
+
+Existing tools (Guarddog, Bandit4Mal) are single-channel: they match API names
+against known-dangerous patterns. If malware wraps `os.system` inside a custom
+function named `_helper`, splits the payload across three files, or uses
+`getattr(builtins, 'ev'+'al')`, these tools miss it.
+
+NEW_DDG solves this by:
+
+| Technique | What it catches | Previous tools |
+|---|---|---|
+| **Interprocedural taint** | Payload split across functions/files | ✗ Miss |
+| **call_target as sink** | `getattr(builtins,'ev'+'al')(x)` — dynamic dispatch | ✗ Miss |
+| **Function summaries** | `decode(x)` where `decode` wraps `os.system` | ✗ Miss |
+| **Container tracking** | `data['k']=x; exec(data['k'])` — container-mediated flow | ✗ Miss |
+| **Branch-aware kill** | 3+ branch `if/elif/else` taint retention | ✗ Lost |
+| **PyPI registry check** | Typosquat, name-squat, package takedown | Partial |
+| **Duplicate detection** | `botaa3` = exact copy of `boto3` with different name | ✗ Miss |
+
+---
+
+## ✨ Features
+
+- 🔍 **Four independent detection channels** — regex, graph+taint, LLM semantic, registry
+- 🧬 **Interprocedural taint analysis** — tracks untrusted data through function calls, return values, and cross-file imports
+- 📊 **Three-layer CPG-lite** — Module → Function summaries → Statement-level DDG
+- 🎯 **AST-resolved call targets** — penetrates `getattr(builtins,'ev'+'al')`, variable aliases, `globals()` subscripts
+- 📦 **Container tracking** — `data['key']=x → exec(data['key'])` chain preserved
+- 🌿 **Branch-aware kill semantics** — 3+ branch taint retention
+- ☠️ **Dead code pruning** — `if False:` / post-`raise` blocks pruned via py2cfg + constant folding
+- 🏷️ **Function summaries** — composable `param_to_sink` / `return_tainted` facts per function
+- 🧹 **LLM input sanitization** — strips comments/docstrings, marks injection attempts
+- 💾 **Verdict caching** — content-hash keyed, 40% hit rate on re-runs
+- 🌐 **PyPI registry verification** — existence check, version validation, typosquat via full 500K index
+- 🧪 **Deterministic output** — same input → byte-identical results across processes
+- 🖥️ **Sandbox behavioral probe** — audit-hook based install-time monitoring (opt-in)
+
+---
+
+## 🏗️ Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Input: tar.gz / directory                 │
+└────────────────────────────┬────────────────────────────────────┘
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Channel ① Enhanced Detection (regex, ms-level)                  │
+│    install hooks · typosquat · metadata · distribution mismatch  │
+│    PyPI 404 · fake version · duplicate detection · sandbox       │
+├─────────────────────────────────────────────────────────────────┤
+│  Channel ② Obfuscation Detection (AST + density gating)          │
+│    hex/base64/encoding patterns · eval/exec/compile counting     │
+├─────────────────────────────────────────────────────────────────┤
+│  Channel ③ Graph + Taint (DDG V7 — core)                         │
+│    ┌──────────────────────────────────────────────────────────┐  │
+│    │ L1 Module:  dist name / PyPI verification / duplicate    │  │
+│    │ L2 Function: summaries (return_tainted, param_to_sink)   │  │
+│    │ L3 Statement: DDG (typed edges, kill, call_target)       │  │
+│    └──────────────────────────────────────────────────────────┘  │
+│    Taint Engine: reverse BFS (data/param/call/return edges only) │
+├─────────────────────────────────────────────────────────────────┤
+│  Channel ④ Voting (LLM semantic + rule scoring)                  │
+│    Prioritizer → Rule Scorer → LLM Classifier (sanitized input)  │
+│    ↳ Cross-channel corroboration                                 │
+├─────────────────────────────────────────────────────────────────┤
+│  Package-level LLM Aggregation                                   │
+│    All signals → holistic judgment (borderline cases)            │
+└─────────────────────────────────────────────────────────────────┘
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Verdict: MALICIOUS / SUSPICIOUS / BENIGN / ANALYSIS_FAILED      │
+│  + taint chains + attack chains + function summaries + evidence  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+<details>
+<summary>🔍 <b>How taint chains work (click to expand)</b></summary>
+
+```python
+# Input: malicious package with payload split across 3 files
+
+# source.py
+def get_config():
+    return os.environ.get('C')           # ← SOURCE: environment
+
+# transform.py
+def decode():
+    return base64.b64decode(get_config())  # ← TRANSFORM: decoded_data
+
+# main.py
+def run():
+    data = decode()                       # ← call to transform
+    os.system(data)                       # ← SINK: command_execution
+```
+
+**Step 1**: Builder extracts DDG per file, creates interprocedural edges:
+```
+source.py: [environ.get] ──data──→ [return node]
+                    ↕ (cross-file return edge)
+transform.py: [get_config()] ──data──→ [b64decode] ──data──→ [return node]
+                    ↕ (cross-file return edge)
+main.py: [decode()] ──data──→ [data = ...] ──data──→ [os.system(data)]
+```
+
+**Step 2**: Taint engine runs reverse BFS from sink:
+```
+os.system(data) ← data ← decode() ← (cross-file) ← b64decode ← (cross-file) ← environ
+    [SINK]                                                          [SOURCE: environment]
+```
+
+**Step 3**: Output chain:
+```
+[SOURCE] source.py:3 — environment
+  → [PROPAGATE] transform.py:4 — b64decode(get_config())
+    → [SINK] main.py:5 — os.system(data)
+    (7 steps, 3 files, confidence=0.75)
+```
+
+</details>
+
+---
+
+## 📦 Installation
+
+### Prerequisites
+
+- Python 3.10+ (tested on 3.14)
+- pip packages: `zhipuai`, `networkx`, `py2cfg`
 
 ```bash
-# Basic analysis (no LLM needed, regex + graph + index channels)
-python batch_solution_b_v2.py <packages_dir> --api-key <KEY> --count 50
+pip install zhipuai networkx py2cfg
+```
 
-# Full analysis (LLM semantic verification)
-python batch_solution_b_v2.py <packages_dir> --api-key <KEY> --count 50 \
-    --llm-model glm-4-flashx --verify-pypi --parallel-workers 5
+### Clone
 
-# With sandbox probe (⚠️ executes package code, only in isolated VM!)
-python batch_solution_b_v2.py <packages_dir> --api-key <KEY> \
+```bash
+git clone https://github.com/chen-map/Pypi-Malicious-Code-detect-Static.git
+cd Pypi-Malicious-Code-detect-Static
+```
+
+---
+
+## 🚀 Usage
+
+### Basic Analysis (no LLM, regex + graph + index channels)
+
+```bash
+python batch_solution_b_v2.py ./packages/ --api-key <KEY> --count 50
+```
+
+### Full Analysis (all channels + LLM)
+
+```bash
+python batch_solution_b_v2.py ./packages/ \
+    --api-key <GLM_API_KEY> \
+    --count 100 \
+    --llm-model glm-4-flashx \
+    --verify-pypi \
+    --parallel-workers 5
+```
+
+### With Sandbox Probe
+
+> ⚠️ **Warning**: executes package code. Only use in isolated VM/container.
+
+```bash
+python batch_solution_b_v2.py ./packages/ --api-key <KEY> \
     --sandbox --verify-pypi --count 50
 ```
 
-## Architecture
+### CLI Options
 
 ```
-Four Detection Channels (independent, fail-safe):
-  ① Enhanced Detection (regex, ms-level) — install hooks, typosquat, metadata
-  ② Obfuscation Detection (AST + density gating) — hex/base64/encoding patterns
-  ③ Graph + Taint (DDG V7, core) — interprocedural taint analysis
-  ④ Voting (LLM semantic + rule scoring) — function-level subgraphs
-      ↳ Package-level LLM Aggregation (holistic judgment)
-
-Three-Layer Graph (CPG-lite):
-  L1 Module:  dist name / PyPI verification / duplicate detection
-  L2 Function: summaries (return_tainted, param_to_sink, composable)
-  L3 Statement: typed edges (data/control/call/param/return) + kill semantics
+positional:      tarfile_dir          Directory containing .tar.gz files
+--api-key        KEY                  ZhipuAI API key
+--llm-model      MODEL                LLM model (default: glm-4-flashx)
+--count          N                    Max packages to analyze
+--extract-base   DIR                  Extraction directory
+--verify-pypi                         Enable PyPI index verification
+--sandbox                             Enable behavioral probe (⚠️ executes code)
+--parallel-workers N                  LLM call parallelism (default: 1)
+--seed           N                    Sampling seed (default: 42)
+--no-llm-cache                        Disable verdict caching
+--skip-rule-scoring                   Skip rule scoring, LLM only
 ```
 
-## Project Structure
+---
+
+## 📊 Detection Capabilities
+
+| Attack Pattern | Detection Channel | Example |
+|---|---|---|
+| Install hooks (`cmdclass`) | ① Enhanced | `setup(name='evil', cmdclass={'install': MaliciousInstall})` |
+| Install-time exfiltration | ① Enhanced | `setup.py` reads env + sends to C2 |
+| Typosquatting | ① + ⑤ | `botaa3` (≈ `boto3`), `python-dateutils` (≈ `python-dateutil`) |
+| Name-squat / code duplicate | ⑤ Registry | `botaa3` = exact copy of `boto3` with different name |
+| PyPI takedown (404) | ⑤ Registry | Package removed from PyPI |
+| Base64-encoded payload | ② + ③ Graph | `exec(base64.b64decode(...))` |
+| getattr dynamic dispatch | ③ AST resolver | `getattr(builtins, 'ev'+'al')(x)` |
+| Variable alias | ③ AST resolver | `e = eval; e(x)` |
+| globals subscript | ③ AST resolver | `globals()['ex'+'ec'](x)` |
+| Cross-file payload split | ③ Interprocedural taint | source.py → transform.py → main.py |
+| Custom function wrapper | ③ Summary expansion | `_run(x)` where `_run` calls `os.system` |
+| Container-mediated flow | ③ Container tracking | `d['k']=x; exec(d['k'])` |
+| Branch-tainted flow | ③ Branch-aware kill | `if c: a=taint; elif: a=safe; use(a)` |
+| Semantic pattern | ④ LLM | LLM reads complete function + chain |
+
+---
+
+## 📊 Evaluation Results
+
+### Holdout Set (zero-overlap, 20 malicious + 19 benign)
+
+| Metric | Value |
+|---|---|
+| Recall | **100%** (20/20) |
+| Hard false positive | **0%** (0/18) |
+| LLM model | glm-4-flashx |
+
+### Determinism
+
+| Test | Result |
+|---|---|
+| Same package, 3 processes (PYTHONHASHSEED=1/2/3) | **Byte-identical** (16 files) |
+
+### Channel Attribution (holdout, 20 malicious packages)
+
+| Channel | Attribution |
+|---|---|
+| Code / install script signals | 9 (45%) |
+| Index verification only | 11 (55%) |
+
+---
+
+## 🧪 Testing
+
+```bash
+# Run all 46+ tests across 10 test files
+python tests/run_all.py
+
+# Run specific test
+python tests/test_graph_kernel.py   # Graph kernel (identity, taint, interprocedural)
+python tests/test_determinism.py    # Cross-process byte-identical output
+python tests/test_sandbox_probe.py  # Behavioral probe (synthetic packages only)
+```
+
+---
+
+## 📁 Project Structure
 
 ```
 NEW_DDG/
-├── batch_solution_b_v2.py   # Main entry point (batch analyzer)
-├── new_ddg_gui.py           # GUI launcher
-├── danger_patterns.json     # Dangerous API pattern definitions
+├── batch_solution_b_v2.py      # Main entry point
+├── new_ddg_gui.py              # GUI launcher
+├── danger_patterns.json        # Dangerous API patterns
 │
-├── src/                     # Core analysis modules
-│   ├── ddg_builder_v7.py    #   DDG builder (AST extraction, kill, call_target)
-│   ├── call_graph_analyzer.py # Call graph + attack chains (cross-file)
-│   ├── cfg_adapter.py       #   py2cfg precise CFG (constant folding)
-│   ├── lightweight_cfg.py   #   CFG fallback
-│   ├── taint_engine.py      #   Interprocedural taint analysis
-│   ├── call_resolver.py     #   AST-level call target resolution
-│   ├── enhanced_detector.py #   Non-code threats (hooks, deps, metadata, names)
-│   ├── attack_chain_rebuilder.py # Attack chain reconstruction
-│   ├── function_summaries   #   (built into ddg_builder)
-│   ├── llm_sanitizer.py     #   LLM input sanitization
-│   ├── sandbox_probe.py     #   Behavioral probe (audit hook)
-│   ├── pypi_verifier.py     #   PyPI existence/version verification
-│   ├── pypi_index.py        #   PyPI full index (typosquat detection)
-│   ├── duplicate_detector.py#   Code similarity vs genuine packages
+├── src/                        # Core modules
+│   ├── ddg_builder_v7.py       # DDG builder (kill, call_target, container)
+│   ├── call_graph_analyzer.py  # Call graph + attack chains
+│   ├── cfg_adapter.py          # py2cfg precise CFG
+│   ├── taint_engine.py         # Interprocedural taint analysis
+│   ├── call_resolver.py        # AST-level call target resolution
+│   ├── enhanced_detector.py    # Non-code threats
+│   ├── llm_sanitizer.py        # LLM input sanitization
+│   ├── pypi_verifier.py        # PyPI verification
+│   ├── pypi_index.py           # Full index (typosquat)
+│   ├── duplicate_detector.py   # Code similarity
+│   ├── sandbox_probe.py        # Behavioral probe
+│   ├── attack_chain_rebuilder.py
 │   ├── file_integrity_checker.py
-│   ├── common/
-│   │   ├── graph_partitioner.py  # Function-level partitioning
-│   │   └── pattern_matcher.py    # Dangerous node detection
-│   └── malicious_stubgen_v13/    # Stub generation (experimental)
+│   ├── lightweight_cfg.py      # CFG fallback
+│   └── common/
+│       ├── graph_partitioner.py  # Function-level partitioning
+│       └── pattern_matcher.py    # Dangerous node detection
 │
-├── SOLUTION_B_VOTING/       # Voting architecture
-│   ├── src/                 #   Classifier, scorer, prioritizer
-│   └── prompts/             #   LLM prompt templates
+├── SOLUTION_B_VOTING/          # Voting architecture
+│   ├── src/                    #   Classifier, scorer, prioritizer
+│   └── prompts/                #   LLM templates
 │
-├── prompts/                 # Shared LLM prompts
-├── config/                  # Configuration files
-├── tests/                   # Regression tests (8 files, 46+ items)
-├── docs/                    # Documentation
-├── scripts/                 # Deployment scripts
-│
-├── data/                    # Evaluation datasets (tar.gz archives)
-│   ├── sample_line/         #   30 stratified samples from corpus
-│   ├── eval_malicious/      #   20 malicious (eval seed=2026)
-│   ├── eval_benign/         #   20 benign (PyPI official)
-│   ├── holdout_malicious/   #   20 malicious (holdout seed=777)
-│   └── holdout_benign/      #   19 benign (holdout)
-│
-└── output/                  # Runtime output (gitignored)
-    ├── results/             #   Analysis results (JSON/JSONL)
-    ├── packages/            #   Extracted packages + .ddg_output
-    └── .llm_cache/          #   LLM verdict cache
+├── prompts/                    # Shared prompts
+├── config/                     # Configuration
+├── tests/                      # 10 test files
+├── docs/                       # Documentation
+├── scripts/                    # Deployment
+└── output/                     # Runtime output (gitignored)
 ```
 
-## Key Design Decisions
+---
 
-| Decision | Rationale |
-|---|---|
-| Only critical short-circuits MALICIOUS | Prevent single-regex false positives |
-| Function-level partitioning | Semantic boundaries, LLM sees complete context |
-| Interprocedural return edges | Cross-function/cross-file taint propagation |
-| call_target as sink | Untrusted data controlling call target = code execution |
-| Summary propagation | Sink-ness flows through function call graph |
-| Package-level LLM aggregation | Holistic judgment for borderline cases |
-| ANALYSIS_FAILED ≠ BENIGN | Infrastructure failure is not evidence of safety |
-| Kill semantics (branch-aware) | Don't lose taint in if/elif/else branches |
-| Container tracking | `data['key']=x → exec(data['key'])` chain preserved |
+## 🤝 Acknowledgments
 
-## Testing
+- **[GLM (ZhipuAI)](https://open.bigmodel.cn/)** — Primary development assistant.
+  GLM-4-FlashX was used throughout the project for LLM-assisted code analysis,
+  and GLM participated as an AI pair programmer across all 22 rounds of
+  architecture evolution — from initial design through debugging, testing,
+  and documentation.
 
-```bash
-python tests/run_all.py  # Run all 8 test files (46+ items, no API key needed)
-```
+- **[py2cfg](https://github.com/jimenezj6/py2cfg)** — Control flow graph construction
 
-## Key Metrics (holdout evaluation, zero-overlap)
+- **[Guarddog](https://github.com/DataDog/guarddog)** / **[Bandit4Mal](https://github.com/ohmtech-research/bandit4mal)** — Baseline tools for comparison
 
-- Recall: **100%** (20/20 malicious → MALICIOUS)
-- Hard false positive: **0%** (0/18 benign → MALICIOUS)
-- LLM model: glm-4-flashx (configurable via --llm-model)
+- **[Backstabber's Knife Collection](https://github.com/cybertier/Backstabbers-Knife-Collection)** — Reference for dataset construction methodology
 
-## v2.0 修改说明
+---
 
-相比 v1.0（最初版本），本次大改涉及 **22 轮迭代**，核心改进：
+## 📄 License
 
-### 新增检测能力
+MIT License — see [LICENSE](LICENSE) for details.
 
-| 能力 | 说明 |
-|---|---|
-| **过程间污点分析** | 污点可穿过函数边界、跨文件传播（此前函数边界即断链） |
-| **call_target 即 sink** | 不可信数据控制调用目标 = 动态代码执行，覆盖 getattr/别名/globals 下标 |
-| **函数摘要** | 每个函数预计算 param→sink / return_tainted 事实，跨文件污点 O(1) 查询 |
-| **AST 级调用解析** | getattr 常量折叠、别名追踪、globals 下标——不再依赖文本匹配 |
-| **容器追踪** | `data['key']=x → exec(data['key'])` 链保持 |
-| **分支感知 kill** | 三分支以上 taint 不再丢失 |
-| **PyPI 全量索引核验** | typosquat 检测用全量 50 万包名（缓存 24h），不再依赖 40 个硬编码清单 |
-| **近重复检测** | 下载真包做文件哈希比对，抓"抄代码改名"族（botaa3） |
-| **PyPI 存在性核验** | 发行名 404 或版本不存在 → critical（需要 --verify-pypi） |
-| **沙箱行为探针** | audit hook 记录安装期网络/子进程/写文件（--sandbox，隔离环境） |
-| **包级 LLM 聚合** | 所有通道跑完后 LLM 综观全部证据做最终判断 |
+---
 
-### 修复的严重 bug
+<div align="center">
 
-| bug | 影响 |
-|---|---|
-| setup.py 含 cmdclass → 整个 DDG 构建崩溃 | 所有含构建钩子的包静默变"良性" |
-| severity 字符串字典序比较 | critical 被降为 medium |
-| async 函数打崩调用图 | 含 async def 的文件全部退出分析 |
-|轻量 CFG 无限递归 | 任何含 def 的文件必 RecursionError |
-| 4MB 大文件调用图卡死 | alibabacloud 等大型 SDK 从 >12min → 16s |
-| Subscript 赋值不更新 def 链 | `data['key']=x → exec(data['key'])` 断链 |
-| 三分支 kill 丢污点 | if/elif/else 第三分支的污点被丢弃 |
-| 危险节点膨胀 58% | URL 字符串赋值被判 network、函数定义自匹配 |
-| console_scripts 判死 | 所有含 CLI 入口的正常包全部 MALICIOUS |
+**⚠️ Disclaimer**: This tool performs static analysis and optional behavioral probing.
+It is designed for security research and package screening. Verdicts should be
+reviewed by human analysts before taking action.
 
-### 架构重构
-
-| 变更 | 旧 → 新 |
-|---|---|
-| 图分割 | WCC+BFS (~1200 行) → 函数级属性分组 (~50 行) |
-| 节点身份 | basename（同名文件冲突）→ 全路径唯一 |
-| 边分类 | 无分类 → data/control/call/param/return |
-| def-use | 无 kill → kill 语义 + 分支感知 + 容器追踪 |
-| Source/Sink | 纯正则 → resolved_call 优先 + 摘要传播 + 正则回退 |
-| LLM 输入 | 原始代码碎片 → 消毒后完整函数体 + 污点链 + 摘要 |
-| LLM 输出 | 直接采信 → clamp + 注入回显降信 + 跨通道交叉验证 |
-| LLM 成本 | 每次重新调用 → 内容哈希缓存（40% 命中） |
-| 子图确定性 | 随机（子图数波动）→ 三进程哈希逐字节一致 |
-| 结果落盘 | 批次结束一次性 → 逐包 JSONL 增量（崩溃不丢） |
-
-### 新增文件
-
-| 文件 | 作用 |
-|---|---|
-| `src/call_resolver.py` | AST 级调用目标解析 |
-| `src/taint_engine.py` | 过程间污点引擎 |
-| `src/llm_sanitizer.py` | LLM 输入消毒 |
-| `src/pypi_verifier.py` | PyPI 存在性核验 |
-| `src/pypi_index.py` | 全量包名索引 |
-| `src/duplicate_detector.py` | 近重复检测 |
-| `src/sandbox_probe.py` | 沙箱行为探针 |
-| `tests/` (10 files) | 46+ 项回归测试 |
-
-### 删除的冗余
-
-| 删除项 | 原因 |
-|---|---|
-| WCC+BFS 分割 (~1200 行) | 被函数级分割替代 |
-| 旧版主程序 batch_v20_complete_voting.py | 被当前主程序替代 |
-| .broken/.backup 文件 | 已修复或过时 |
-| 692MB 垃圾文件 | 误创建 |
-| config/classification_rules.json | 孤儿配置（无引用） |
+</div>
