@@ -15,6 +15,8 @@ TESTS = [
     'test_graph_kernel.py',
     'test_llm_hardening.py',
     'test_cross_file_taint.py',
+    'test_escalation.py',
+    'test_escalation_e2e.py',
 ]
 
 

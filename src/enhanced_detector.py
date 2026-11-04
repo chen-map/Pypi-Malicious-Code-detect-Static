@@ -165,7 +165,8 @@ class EnhancedSecurityDetector:
         return n
 
     def _analyze_distribution_name(self, dist_name: str, metadata_name: str,
-                                   use_live_index: bool = False) -> Dict:
+                                   use_live_index: bool = False,
+                                   metadata_source: str = '') -> Dict:
         """发行包名分析：名称抢注 / 依赖混淆（2026-10，真实样本驱动）
 
         恶意包的代码常常是抄来的真实包(甚至完全干净)，攻击在"名字"上：
@@ -174,6 +175,10 @@ class EnhancedSecurityDetector:
 
         2026-10 硬化：use_live_index 时比对目标从 40 个硬编码清单升级为
         PyPI simple index 全量包名（磁盘缓存 24h）；索引不可用时回退清单。
+
+        2026-11 硬化：name_mismatch 只认 PKG-INFO/METADATA（构建系统生成的
+        权威元数据）。setup.py 解析出的名字可以是任意字面量（模板/夹具），
+        用它判 critical 会冤枉正常包。
         """
         result = {'threats': [], 'has_threats': False, 'threat_level': 'safe',
                   'dist_name': dist_name or '', 'metadata_name': metadata_name or ''}
@@ -183,14 +188,21 @@ class EnhancedSecurityDetector:
         candidates = [c for c in (dn, mn) if c]
 
         if dn and mn and dn != mn:
+            # 来源门控:只有权威元数据(PKG-INFO/METADATA)的不一致才是铁证。
+            # setup.py 来源降为 medium 并注明来源——它可能是模板/示例字面量。
+            authoritative = metadata_source in ('pkg_info', 'metadata')
             result['threats'].append({
                 'type': 'name_mismatch',
-                # critical: 正常发行流程中 sdist/wheel 文件名与元数据 Name 必然一致，
-                # 不一致本身就是名称抢注/依赖混淆的决定性证据(botaa3 → boto3)
-                'severity': 'critical',
+                # critical: 正常发行流程中 sdist/wheel 文件名与 PKG-INFO Name
+                # 必然一致，不一致本身就是名称抢注/依赖混淆的决定性证据
+                'severity': 'critical' if authoritative else 'medium',
                 'dist_name': dist_name,
                 'metadata_name': metadata_name,
-                'reason': '发行包名与元数据 Name 不一致（典型名称抢注/依赖混淆特征）',
+                'metadata_source': metadata_source or 'unknown',
+                'reason': ('发行包名与元数据 Name 不一致（典型名称抢注/依赖混淆特征）'
+                           if authoritative else
+                           '发行包名与 setup.py 中 name 不一致（setup.py 是代码，'
+                           '可能为模板/示例字面量，仅作弱信号）'),
             })
 
         typosquat_found = False
@@ -279,6 +291,7 @@ class EnhancedSecurityDetector:
                 dist_name or metadata_result.get('package_name', ''),
                 metadata_result.get('package_name', ''),
                 use_live_index=bool(verify_pypi),  # 硬化：实时全量名比对
+                metadata_source=metadata_result.get('package_name_source', ''),
             ),
             'pypi_verification': {'status': 'skipped', 'reason': '未启用'},
             'overall_threat_level': 'safe',
@@ -393,8 +406,15 @@ class EnhancedSecurityDetector:
             total_score += threat_scores.get(report['distribution_analysis']['threat_level'], 0)
 
         # 确定总体威胁等级
+        # 2026-11 硬化:critical 必须有真实的 critical 单信号支撑。
+        # 此前纯累加评分:medium(4)+high(7)=11 → critical → 触发短路判死,
+        # 两个低精度信号(live索引typosquat + 依赖名形似)就能冤枉良性包
+        # (a2a_sdk: a2p-sdk 差一字符 + grpcio-tools 形似)。
+        # 累加只能区分 high/medium/low,不能凭空造出最高等级。
         report['threats_found'] = threats
-        if total_score >= 10:
+        has_critical_signal = any(
+            (t.get('severity') or '').lower() == 'critical' for t in threats)
+        if total_score >= 10 and has_critical_signal:
             report['overall_threat_level'] = 'critical'
         elif total_score >= 7:
             report['overall_threat_level'] = 'high'
@@ -562,36 +582,56 @@ class EnhancedSecurityDetector:
         return result
 
     def _analyze_metadata(self, extracted_dir: Path) -> Dict:
-        """分析元数据的可疑性"""
+        """分析元数据的可疑性
+
+        2026-11 硬化:package_name 必须记录来源。setup.py 是**代码**不是
+        元数据,从中解析出的 name 可能是模板示例/测试夹具的字面量
+        (acryl_datahub_actions 的 setup.py 解析出 '"hello_world"' →
+        name_mismatch critical → 短路判死)。只有 PKG-INFO/METADATA
+        (构建系统生成的权威元数据)才允许作为名称抢注判据。
+        """
         result = {
             'has_threats': False,
             'threat_level': 'safe',
             'threats': [],
             'package_name': '',
+            'package_name_source': '',
             'author': '',
             'url': '',
             'email': ''
         }
 
-        # 读取PKG-INFO或METADATA
+        # 权威元数据优先(PKG-INFO/METADATA 由构建系统生成);setup.py 垫底
+        # 仅用于填充 author/url 等辅助字段,名称判据会检查来源
         metadata_files = [
-            extracted_dir / 'PKG-INFO',
-            extracted_dir / 'METADATA',
-            extracted_dir / 'setup.py'  # 也可以从setup.py提取
+            (extracted_dir / 'PKG-INFO', 'pkg_info'),
+            (extracted_dir / 'METADATA', 'metadata'),
+            (extracted_dir / 'setup.py', 'setup_py'),
         ]
 
         metadata = {}
-        for meta_file in metadata_files:
+        name_source = ''
+        for meta_file, source in metadata_files:
             if not meta_file.exists():
                 continue
 
             try:
                 content = meta_file.read_text(encoding='utf-8', errors='ignore')
-                metadata.update(self._parse_metadata(content))
+                parsed = self._parse_metadata(content)
             except Exception:
                 continue
+            # 名称与版本按"权威优先"合并:PKG-INFO 已有名字就不让 setup.py 覆盖
+            if parsed.get('name') and not metadata.get('name'):
+                metadata['name'] = parsed['name']
+                name_source = source
+            if parsed.get('version') and not metadata.get('version'):
+                metadata['version'] = parsed['version']
+            for k, v in parsed.items():
+                if k not in ('name', 'version'):
+                    metadata.setdefault(k, v)
 
-        result['package_name'] = metadata.get('name', '')
+        result['package_name'] = (metadata.get('name') or '').strip().strip('"\'')
+        result['package_name_source'] = name_source
         result['package_version'] = metadata.get('version', '')  # 真包版本（近重复检测用）
         result['author'] = metadata.get('author', '')
         result['url'] = metadata.get('home_page', metadata.get('url', ''))
@@ -733,22 +773,44 @@ class EnhancedSecurityDetector:
         return deps
 
     def _parse_metadata(self, content: str) -> Dict:
-        """解析PKG-INFO/METADATA格式"""
+        """解析 PKG-INFO/METADATA 格式（RFC822 风格头部）
+
+        2026-11 修复:同名字段**首见优先**,不允许后出现的覆盖前面的。
+        PKG-INFO 头部的 Name/Version 是构建系统写入的权威元数据,而
+        Description 正文(README 内容)里常有 yaml/代码示例形如
+        `name: hello_world` —— 顺序覆盖会让正文覆盖头部,
+        acryl_datahub_actions 因此解析出 name='hello_world',
+        伪造出 name_mismatch critical 并短路判死。
+
+        另加保护:进入 Description 之后的正文不再解析字段(正文可能
+        有任意 `word: value` 行),只保留头部元数据。
+        """
         metadata = {}
         current_field = None
+        in_body = False
 
         for line in content.split('\n'):
             line = line.rstrip()
+
+            # Description 之后是正文,不再解析字段
+            if in_body:
+                continue
 
             # 检查字段行
             match = re.match(r'^([A-Za-z-]+):\s*(.*)', line)
             if match:
                 field_name, value = match.groups()
-                current_field = field_name.lower()
-                metadata[current_field] = value
+                key = field_name.lower()
+                current_field = key
+                if key == 'description':
+                    in_body = True  # 后续全是正文
+                # 首见优先:头部字段不被正文/重复字段覆盖
+                if key not in metadata:
+                    metadata[key] = value
             elif current_field and line.startswith(' '):
                 # 续行
-                metadata[current_field] += ' ' + line.strip()
+                metadata[current_field] = (
+                    metadata.get(current_field, '') + ' ' + line.strip())
 
         return metadata
 

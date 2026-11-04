@@ -308,11 +308,12 @@ python batch_solution_b_v2.py /path/to/numpy-1.24.0
 
 ## Next Steps
 
-1. **Upload files to remote server** (requires SSH access with password [REDACTED])
+1. **Upload files to the analysis host** (SSH credentials are not stored in this
+   repository — configure access separately)
 2. **Restart analysis tasks** to test enhanced detection:
    ```bash
-   ssh -p <ssh-port> wch@<analysis-host>
-   cd /disk2/wch/projects/NEW_DDG
+   ssh <user>@<analysis-host>
+   cd <remote-project-dir>
    # Upload updated files first
    # Then restart tasks
    ```

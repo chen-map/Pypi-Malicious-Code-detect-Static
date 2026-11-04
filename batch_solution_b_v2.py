@@ -45,6 +45,167 @@ from src.enhanced_detector import EnhancedSecurityDetector
 # 攻击链重建器（从DDG节点/边重建 数据引入→处理→危险执行→外传 四阶段攻击链）
 from src.attack_chain_rebuilder import AttackChainRebuilder
 
+# SUSPICIOUS 升级门控（2026-11）:与离线重判脚本共用 taint_engine 中的同一份
+# 逻辑，保证在线投票与离线重判口径一致（强源→sink / 任意→外传 才自动升级）
+from src.taint_engine import escalation_gate
+
+
+# ===== 单包分析超时保护（2026-11）=====
+# analyze_package 在千文件级框架包上纯计算爆炸（agent_framework:
+# 1093个py文件, CPU满转 40+ 分钟无产出, 卡死整个批次）。
+# 每包在子进程中分析, 超过 PER_PACKAGE_TIMEOUT 秒强杀 → 记
+# ANALYSIS_FAILED(timeout), 批次继续。0 = 关闭（调试用）。
+PER_PACKAGE_TIMEOUT = 900
+
+# 子图分析预算（2026-11）：超大 monorepo（ag2: 1136 个函数级子图）下游
+# 成本线性爆炸 → 超时。按危险节点数保留最危险的前 N 个。
+MAX_SUBGRAPHS_ANALYZED = 400
+
+
+def _analyze_one_in_subprocess(input_path, input_type, worker_kwargs, results_jsonl_str):
+    """子进程 worker: 构造独立 analyzer 分析单包并落盘结果行。
+
+    结果直接 append 到批次 JSONL——子进程与主进程从不同时写
+    （子进程写完才退出, 主进程 join 后才读）, 无竞争。
+    """
+    import json as _json
+    import time as _time
+    kw = dict(worker_kwargs)
+    kw['tarfile_dir'] = str(input_path)
+    analyzer = BatchAnalyzerV20Voting(**kw)
+    try:
+        result = analyzer.analyze_package(input_path, input_type)
+    except Exception as e:
+        result = {
+            'package_name': input_path.name,
+            'final_category': 'ANALYSIS_FAILED',
+            'final_risk_score': 0.5,
+            'final_confidence': 0.3,
+            'error': str(e)[:300],
+        }
+    result['_subprocess'] = True
+    result['_ts'] = _time.time()
+    # 按输入文件名索引:analyze_package 返回的 package_name 是解压目录名
+    # (如 "foo-1.0"), 与主进程查找键(input_path.name="foo-1.0.tar.gz")
+    # 不一致——此前 92 个成功包因此被主进程误判 "died without result"
+    result['_input_name'] = input_path.name
+    with open(results_jsonl_str, 'a', encoding='utf-8') as f:
+        f.write(_json.dumps(result, ensure_ascii=False, default=str) + '\n')
+
+
+def _read_subprocess_result(jsonl_path, pkg_name):
+    """从批次 JSONL 尾部找该输入由子进程写入的结果行（按 _input_name 匹配）。"""
+    p = Path(jsonl_path)
+    if not p.exists():
+        return None
+    try:
+        lines = p.read_text(encoding='utf-8').splitlines()
+        for line in reversed(lines):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if (row.get('_input_name') == pkg_name or
+                    (row.get('_subprocess') and row.get('package_name') == pkg_name)):
+                row.pop('_subprocess', None)
+                row.pop('_ts', None)
+                row.pop('_input_name', None)
+                return row
+    except Exception:
+        return None
+    return None
+
+
+def _flagged_code_signals(verdicts, subgraph_jsons, max_funcs=4, max_chars=1200):
+    """组装可疑/恶意子图的函数代码原文（2026-11 证据完整性修复）。
+
+    此前包级 LLM 只有下级"判决标签"——被要求复核一个看不到代码的
+    判决只能回声。给代码原文它才能独立推翻或确认。
+    预算: 最多 max_funcs 个函数, 每个按行号去重排序重组、截断 max_chars。
+    """
+    flagged = [v for v in verdicts if v.get('final_verdict') in ('SUSPICIOUS', 'MALICIOUS')]
+    by_name = {s.get('subgraph_name'): s for s in (subgraph_jsons or [])}
+    lines_out = []
+    shown = 0
+    for v in flagged[:max_funcs]:
+        sg = by_name.get(v.get('subgraph_name'))
+        if not sg:
+            continue
+        code_lines = sorted({(n.get('line', 0), n.get('code', ''))
+                             for n in (sg.get('nodes') or []) if n.get('code')})
+        buf, total = [], 0
+        for _ln, code in code_lines:
+            if total + len(code) > max_chars:
+                buf.append('  ...')
+                break
+            buf.append(f'  {code}')
+            total += len(code)
+        if buf:
+            lines_out.append(f"Code of flagged subgraph '{v.get('subgraph_name')}' "
+                             f"(verdict={v.get('final_verdict')}):")
+            lines_out.extend(buf)
+            shown += 1
+    if shown:
+        lines_out.append(f"({shown} flagged subgraphs' code shown - judge from the code itself)")
+    return lines_out
+
+
+def _llm_escalation_corroborated(enhanced_detection_result, voting_result):
+    """包级 LLM 升级 MALICIOUS 的机械复核（2026-11）。
+
+    弱模型实测会无视 prompt 判据（良性 fork 名被 "typosquatting high" 或
+    "setup.py 有 exec" 引着升级）。结构性证据不足时升级一律驳回：
+      允许升级的结构性证据（与投票层门控同口径）：
+      1. 增强通道 critical（真实 critical 单信号，弱信号累加不算——Bug D）
+      2. 可疑子图自带强污点链（escalation_gate）
+      3. PyPI not_found（名字不存在=确定性铁证）
+    返回 (是否允许, 理由字符串)。
+    """
+    ed = enhanced_detection_result or {}
+    ed_lvl = ed.get('overall_threat_level', 'safe')
+    pypi_st = (ed.get('pypi_verification') or {}).get('status', '')
+    # 只统计**被判可疑/恶意**的子图——BENIGN 子图里的链不能作为升级依据。
+    # （ag2 教训:400 个子图中 396 个 BENIGN,其中某函数恰有 network→sink 链,
+    #  导致 strong_chain 误判为 True,弱链升级被放行。）
+    flagged = [v for v in (voting_result or {}).get('subgraph_verdicts', [])
+               if v.get('final_verdict') in ('SUSPICIOUS', 'MALICIOUS')]
+    strong_chain = any(escalation_gate(v.get('taint_chains')) for v in flagged)
+    if ed_lvl == 'critical':
+        return True, '增强通道 critical'
+    if strong_chain:
+        return True, '可疑子图自带强污点链'
+    if pypi_st == 'not_found':
+        return True, 'PyPI not_found'
+    return False, (f'无结构性证据(ed={ed_lvl}, pypi={pypi_st or "n/a"}, '
+                   f'强链={"Y" if strong_chain else "N"})')
+
+
+def _llm_malicious_weak_only(llm_malicious, enhanced_detection_result):
+    """零容忍的强证据门控（2026-11，真实误报驱动）。
+
+    返回需要降级的 verdict 列表（空 = 保留零容忍）。
+
+    背景：`exec(open("_version.py").read())` 是 setuptools-scm 的标准
+    惯用法（file_read→code_execution 弱链），LLM 会判它恶意，零容忍
+    随即判死整包——ag2 / acryl_executor / acryl_datahub_dagster 三个
+    真实良性包因此误报。
+    规则：所有 LLM 恶意子图都只有弱链（不满足 escalation_gate）时降级；
+    只要有一个强链就保留零容忍。独立铁证（增强 critical / PyPI 404）豁免。
+    **无链信息的子图不据此降级**——"没有链"不等于"弱链"（纯语义判决、
+    正则命中或老数据都可能没有链，据此降级会削弱召回）。
+    """
+    if not llm_malicious:
+        return []
+    ed = enhanced_detection_result or {}
+    if (ed.get('overall_threat_level') == 'critical' or
+            (ed.get('pypi_verification') or {}).get('status') == 'not_found'):
+        return []
+    with_chains = [v for v in llm_malicious if (v.get('taint_chains') or [])]
+    if not with_chains:
+        return []  # 无链信息，不据此降级
+    weak = [v for v in with_chains if not escalation_gate(v.get('taint_chains'))]
+    # 全部恶意子图都带链且全是弱链 → 整体降级
+    return weak if len(weak) == len(llm_malicious) else []
+
 
 class BatchAnalyzerV20Voting:
     """批量分析器 V20 - 投票架构"""
@@ -74,6 +235,21 @@ class BatchAnalyzerV20Voting:
         print(f"[输出目录] 所有结果将保存到: output/")
         print(f"  - 解压包: {self.extract_base}")
         print(f"  - 分析结果: output/results/")
+
+    def _worker_kwargs(self) -> Dict:
+        """子进程重建 analyzer 所需的构造参数（不含 tarfile_dir）"""
+        return {
+            'api_key': self.api_key,
+            'count': 1,
+            'extract_base': str(self.extract_base),
+            'skip_rule_scoring': self.skip_rule_scoring,
+            'parallel_workers': self.parallel_workers,
+            'seed': self.seed,
+            'verify_pypi': self.verify_pypi,
+            'use_llm_cache': self.use_llm_cache,
+            'sandbox': self.sandbox,
+            'llm_model': self.llm_model,
+        }
 
     def analyze_all(self):
         """分析所有包（支持.tar.gz文件和文件夹）"""
@@ -120,29 +296,74 @@ class BatchAnalyzerV20Voting:
             print(f"[{idx}/{len(inputs)}] 分析: {input_path.name} ({'文件' if input_type == 'file' else '文件夹'})")
             print(f"{'='*80}")
 
-            try:
-                result = self.analyze_package(input_path, input_type)
-            except Exception as e:
-                print(f"[ERROR] 分析失败: {e}")
-                import traceback
-                traceback.print_exc()
-                # 修复：失败的包原先静默丢失（统计上等于漏检），
-                # 现在记录为 ANALYSIS_FAILED 终态
-                result = {
-                    'package_name': input_path.name,
-                    'final_category': 'ANALYSIS_FAILED',
-                    'final_risk_score': 0.5,
-                    'final_confidence': 0.3,
-                    'error': str(e)[:300],
-                }
+            # 2026-11 大包超时保护:analyze_package 在千文件级框架包上
+            # 会纯计算爆炸(agent_framework-1.9.0: 1093个py文件, CPU满转
+            # 43分钟无产出,卡死整个批次)。子进程隔离 + 硬超时:
+            # 超时 → kill → ANALYSIS_FAILED(timeout),批次继续。
+            result = None
+            if PER_PACKAGE_TIMEOUT > 0:
+                import multiprocessing as mp
+                ctx = mp.get_context('spawn')
+                proc = ctx.Process(
+                    target=_analyze_one_in_subprocess,
+                    args=(input_path, input_type, self._worker_kwargs(),
+                          str(self.results_jsonl)))
+                proc.start()
+                proc.join(timeout=PER_PACKAGE_TIMEOUT)
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join(5)
+                    print(f"[TIMEOUT] 单包分析超过 {PER_PACKAGE_TIMEOUT}s，强制终止，标记 ANALYSIS_FAILED")
+                    result = {
+                        'package_name': input_path.name,
+                        'final_category': 'ANALYSIS_FAILED',
+                        'final_risk_score': 0.5,
+                        'final_confidence': 0.3,
+                        'error': f'analysis timeout ({PER_PACKAGE_TIMEOUT}s)',
+                        'timeout': True,
+                    }
+                else:
+                    result = _read_subprocess_result(self.results_jsonl, input_path.name)
+                    if result is None:
+                        # 子进程崩溃且未落盘
+                        result = {
+                            'package_name': input_path.name,
+                            'final_category': 'ANALYSIS_FAILED',
+                            'final_risk_score': 0.5,
+                            'final_confidence': 0.3,
+                            'error': 'subprocess died without result',
+                        }
+                    else:
+                        # 子进程已把该行写进 JSONL,主进程不再重复落盘
+                        result['_already_written'] = True
+            else:
+                try:
+                    result = self.analyze_package(input_path, input_type)
+                except Exception as e:
+                    print(f"[ERROR] 分析失败: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # 修复：失败的包原先静默丢失（统计上等于漏检），
+                    # 现在记录为 ANALYSIS_FAILED 终态
+                    result = {
+                        'package_name': input_path.name,
+                        'final_category': 'ANALYSIS_FAILED',
+                        'final_risk_score': 0.5,
+                        'final_confidence': 0.3,
+                        'error': str(e)[:300],
+                    }
 
             self.results.append(result)
-            # 逐包追加落盘
-            try:
-                with open(self.results_jsonl, 'a', encoding='utf-8') as f:
-                    f.write(json.dumps(result, ensure_ascii=False, default=str) + '\n')
-            except Exception as write_err:
-                print(f"[WARN] 增量写入失败: {write_err}")
+            # 逐包追加落盘（子进程已写入的行不重复——此前每包双行,
+            # 统计与审计都要先去重）
+            if result.pop('_already_written', False):
+                pass
+            else:
+                try:
+                    with open(self.results_jsonl, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps(result, ensure_ascii=False, default=str) + '\n')
+                except Exception as write_err:
+                    print(f"[WARN] 增量写入失败: {write_err}")
 
             # 打印摘要（兼容混淆包和非混淆包）
             print(f"\n[结果摘要]")
@@ -190,10 +411,52 @@ class BatchAnalyzerV20Voting:
             package_dir = input_path
             print(f"[Step 1/5] 跳过解压（使用现有文件夹）...")
 
-        print(f"[Step 2/5] 运行DDG Builder V7...")
+        # ===== 顺序重排（2026-11）:便宜的先跑 =====
+        # 原顺序先建 DDG(昂贵)再跑增强检测(纯正则),结果:千文件级 monorepo
+        # 包在 DDG 上烧满 15 分钟被超时杀掉,而它本可以被零成本的增强检测
+        # 直接短路。现在:增强检测 → critical 短路 → 规模预判 → DDG 构建。
+        print(f"[Step 2/6] 增强检测（setup.py/依赖/元数据/包名）...")
+        enhanced_detection_result = self.enhanced_detector.analyze_package(
+            package_dir, dist_name=dist_name or package_name,
+            verify_pypi=self.verify_pypi)
+
+        def _enhanced_shortcut(report):
+            return {
+                'package_name': package_name,
+                'final_category': 'MALICIOUS',
+                'final_risk_score': 0.95,
+                'final_confidence': 0.85,
+                'voting_summary': '增强检测命中 critical 级威胁（安装钩子/名称抢注/暗网外传），'
+                                  '直接判定恶意，未进入图分析',
+                'enhanced_threat_level': report['overall_threat_level'],
+                'enhanced_threats': report['threats_found'],
+                'threat_details': {
+                    'setup_py': report['setup_py_analysis'],
+                    'dependency': report['dependency_analysis'],
+                    'metadata': report['metadata_analysis'],
+                    'distribution': report.get('distribution_analysis', {}),
+                },
+                'ddg_risk_level': 'skipped',
+                'ddg_issues': 0,
+                'attack_chains': {'chain_count': 0, 'completeness': 0.0,
+                                  'confidence': 0.0, 'summary': ''},
+                'detection_method': 'enhanced_detection',
+            }
+
+        # 均衡模式：只有 critical 级（真安装钩子+危险API/typosquatting/暗网）
+        # 直通 MALICIOUS；high 降级进投票上下文，避免单条正则判死正常包。
+        # 2026-11:critical 必须由真实 critical 单信号支撑（见 enhanced_detector），
+        # 弱信号累加不再能凑出 critical。
+        if enhanced_detection_result['overall_threat_level'] == 'critical':
+            print(f"[快速判定] 增强检测发现critical级别威胁（跳过图构建）！")
+            for _k in ('setup_py_analysis', 'dependency_analysis', 'metadata_analysis'):
+                print(f"  - {_k}: {enhanced_detection_result[_k]['threat_level']}")
+            return _enhanced_shortcut(enhanced_detection_result)
+
+        print(f"[Step 3/6] 运行DDG Builder V7...")
         ddg_output = self._run_ddg_builder(package_dir)
 
-        print(f"[Step 3/5] 读取DDG V7安全报告和子图数据...")
+        print(f"[Step 4/6] 读取DDG V7安全报告和子图数据...")
         ddg_v7_report = self._read_ddg_v7_report(package_dir)
         subgraph_jsons = self._read_subgraph_jsons(package_dir)
 
@@ -203,43 +466,6 @@ class BatchAnalyzerV20Voting:
             print(f"          [攻击链] {attack_chains_summary['chain_count']} 条, "
                   f"完整性={attack_chains_summary['completeness']}, "
                   f"置信度={attack_chains_summary['confidence']}")
-
-        # 顺序调整（2026-10 大改）：增强检测（纯正则，便宜）先跑，只有 critical
-        # 才短路 MALICIOUS；原先混淆短路在前，恶意混淆包只会拿到 OBFUSCATED
-        # 标签，setup.py 安装钩子等威胁被整体吞掉。high 及以下作为上下文进投票。
-        print(f"[Step 4/6] 增强检测（setup.py/依赖/元数据/包名）...")
-        enhanced_detection_result = self.enhanced_detector.analyze_package(
-            package_dir, dist_name=dist_name or package_name,
-            verify_pypi=self.verify_pypi)
-
-        # 均衡模式：只有 critical 级（真安装钩子+危险API/typosquatting/暗网）
-        # 直通 MALICIOUS；high 降级进投票上下文，避免单条正则判死正常包
-        if enhanced_detection_result['overall_threat_level'] == 'critical':
-            print(f"[快速判定] 增强检测发现critical级别威胁！")
-            print(f"  - setup.py威胁: {enhanced_detection_result['setup_py_analysis']['threat_level']}")
-            print(f"  - 依赖威胁: {enhanced_detection_result['dependency_analysis']['threat_level']}")
-            print(f"  - 元数据威胁: {enhanced_detection_result['metadata_analysis']['threat_level']}")
-
-            # 构建恶意包结果
-            final_result = {
-                'package_name': package_name,
-                'final_category': 'MALICIOUS',
-                'final_risk_score': 0.95,
-                'final_confidence': 0.85,
-                'enhanced_threat_level': enhanced_detection_result['overall_threat_level'],
-                'enhanced_threats': enhanced_detection_result['threats_found'],
-                'threat_details': {
-                    'setup_py': enhanced_detection_result['setup_py_analysis'],
-                    'dependency': enhanced_detection_result['dependency_analysis'],
-                    'metadata': enhanced_detection_result['metadata_analysis'],
-                    'distribution': enhanced_detection_result.get('distribution_analysis', {}),
-                },
-                'ddg_risk_level': ddg_v7_report.get('risk_level', 'unknown'),
-                'ddg_issues': ddg_v7_report.get('total_issues', 0),
-                'attack_chains': attack_chains_summary,
-                'detection_method': 'enhanced_detection'  # 标记检测方式
-            }
-            return final_result
 
         # 2026-10 行为模态(可选):沙箱探针——执行 setup.py 记录安装期
         # 网络/子进程行为。**会执行包内代码,仅在隔离 VM/容器启用!**
@@ -255,10 +481,12 @@ class BatchAnalyzerV20Voting:
                         'final_category': 'MALICIOUS',
                         'final_risk_score': 0.95,
                         'final_confidence': 0.9,
+                        'voting_summary': '沙箱探针捕获安装期高危行为，直接判定恶意',
                         'sandbox': sandbox_result,
-                        'ddg_risk_level': ddg_v7_report.get('risk_level', 'unknown'),
-                        'ddg_issues': ddg_v7_report.get('total_issues', 0),
-                        'attack_chains': attack_chains_summary,
+                        'ddg_risk_level': 'skipped',
+                        'ddg_issues': 0,
+                        'attack_chains': {'chain_count': 0, 'completeness': 0.0,
+                                          'confidence': 0.0, 'summary': ''},
                         'detection_method': 'sandbox_probe',
                     }
                     return final_result
@@ -324,6 +552,15 @@ class BatchAnalyzerV20Voting:
                 'attack_chain_type': verdict.get('attack_chain_type', 'Unknown'),
                 'is_malicious': verdict.get('is_malicious', False),
                 'final_verdict': verdict.get('final_verdict', 'UNKNOWN'),
+                # 2026-11 升级审计：污点链计数 + 升级标记（离线重判依赖此字段）
+                'taint_chain_count': verdict.get('taint_chain_count', 0),
+                'taint_categories': [
+                    {'source_category': c.get('source_category', ''),
+                     'sink_category': c.get('sink_category', ''),
+                     'cross_file': c.get('cross_file', False)}
+                    for c in (verdict.get('taint_chains') or [])[:3]
+                ],
+                'escalated': verdict.get('escalated', False),
             }
             # 如果是恶意子图，添加关键特征
             if verdict.get('is_malicious'):
@@ -342,18 +579,52 @@ class BatchAnalyzerV20Voting:
                 agg = self._package_level_analysis(
                     package_name, voting_result, ddg_v7_report,
                     enhanced_detection_result, attack_chains_summary,
-                    obfuscation_result, package_dir=package_dir)
+                    obfuscation_result, package_dir=package_dir,
+                    subgraph_jsons=subgraph_jsons)
                 if agg and agg.get('final_category'):
                     old_cat = voting_result['final_category']
-                    voting_result['final_category'] = agg['final_category']
+                    new_cat = agg['final_category']
+
+                    # ===== 机械复核门（2026-11，_llm_escalation_corroborated）=====
+                    # 弱模型实测会无视 prompt 判据:良性 fork 名(acryl_*)被
+                    # "typosquatting high"或"setup.py 有 exec"引着升级
+                    # MALICIOUS。结构性证据不足时,LLM 升级一律降回 SUSPICIOUS。
+                    if (new_cat == 'MALICIOUS' and old_cat != 'MALICIOUS'):
+                        ok, why = _llm_escalation_corroborated(
+                            enhanced_detection_result, voting_result)
+                        if not ok:
+                            new_cat = 'SUSPICIOUS'
+                            voting_result['llm_escalation_demoted'] = True
+                            agg['final_category'] = 'SUSPICIOUS'
+                            agg['demote_reason'] = f'LLM升级被机械复核驳回: {why}'
+                            print(f"        [机械复核] LLM升级被驳回({why}) → SUSPICIOUS")
+
+                    voting_result['final_category'] = new_cat
                     voting_result['final_risk_score'] = agg['risk_score']
                     voting_result['final_confidence'] = agg['confidence']
                     voting_result['voting_summary'] = (
-                        f"[Package-level LLM] {old_cat} → {agg['final_category']}: "
+                        f"[Package-level LLM] {old_cat} → {new_cat}: "
                         f"{agg.get('reasoning', '')[:200]}")
-                    print(f"        [Package-level LLM] {old_cat} → {agg['final_category']}")
+                    print(f"        [Package-level LLM] {old_cat} → {new_cat}")
             except Exception as agg_e:
                 print(f"        [WARN] Package-level analysis failed: {agg_e}")
+
+        # ===== 最终证据一致性保险（2026-11，ag2 误报驱动）=====
+        # 不管 MALICIOUS 来自投票层、包级 LLM 还是任何其他路径，
+        # 落盘前统一检查：无结构性证据（增强 critical / 强污点链 / PyPI 404）
+        # 的 MALICIOUS 一律降为 SUSPICIOUS。原先只在包级 LLM 升级分支
+        # 做检查，其他路径（如投票层零容忍）漏网——ag2 就是这样被判死的。
+        if voting_result['final_category'] == 'MALICIOUS':
+            _ok, _why = _llm_escalation_corroborated(
+                enhanced_detection_result, voting_result)
+            if not _ok:
+                print(f"        [最终保险] MALICIOUS 无结构性证据({_why}) → SUSPICIOUS")
+                voting_result['final_category'] = 'SUSPICIOUS'
+                voting_result['voting_summary'] = (
+                    f"[最终保险] 原判MALICIOUS降级: {_why}; "
+                    + (voting_result.get('voting_summary') or '')[:200])
+                voting_result['final_confidence'] = min(
+                    float(voting_result.get('final_confidence') or 0.5), 0.6)
 
         # 精简格式：只保留核心字段
         final_result = {
@@ -361,6 +632,9 @@ class BatchAnalyzerV20Voting:
             'final_category': voting_result['final_category'],
             'final_risk_score': voting_result['final_risk_score'],
             'final_confidence': voting_result['final_confidence'],
+            # 2026-11 可观测性:判决理由必须落盘(此前包级聚合的理由
+            # 只在内存里,JSONL 中 summary 全空,审计/误报复盘无从下手)
+            'voting_summary': (voting_result.get('voting_summary') or '')[:300],
             'total_subgraphs': len(subgraph_jsons),
             'malicious_subgraph_count': voting_result['malicious_count'],
             'subgraph_verdicts': simplified_verdicts,
@@ -387,7 +661,7 @@ class BatchAnalyzerV20Voting:
     def _package_level_analysis(self, package_name, voting_result,
                                 ddg_v7_report, enhanced_detection_result,
                                 attack_chains_summary, obfuscation_result,
-                                package_dir=None):
+                                package_dir=None, subgraph_jsons=None):
         """包级 LLM 聚合分析(2026-11):所有通道跑完后综合判断
 
         与投票的区别:
@@ -396,6 +670,10 @@ class BatchAnalyzerV20Voting:
         → 能理解"1个高危子图比83个良性重要"
         → 能理解"包级混淆信号被函数分割稀释但整体可疑"
         → 能在边界情况(SUSPICIOUS/低count MALICIOUS)做语义判断
+
+        2026-11 证据完整性修复: 附带可疑/恶意子图的函数代码原文。
+        此前包级 LLM 只有下级"判决标签"——它被要求复核一个它看不到
+        代码的判决,只能回声。现在它能亲自读代码推翻或确认。
         """
         if not self.api_key or self.api_key == 'dummy':
             return None
@@ -414,7 +692,12 @@ class BatchAnalyzerV20Voting:
         if obfuscation_result and obfuscation_result.get('obfuscation_score', 0) > 0:
             signals.append(f"Obfuscation score: {obfuscation_result['obfuscation_score']:.2f}")
         if attack_chains_summary and attack_chains_summary.get('chain_count'):
-            signals.append(f"Attack chains: {attack_chains_summary['chain_count']}")
+            # completeness 必须 present:0.37 的"4条链"不构成完整攻击链证据,
+            # 缺了这个数 LLM 会按"有链→MALICIOUS"拍板(a2a_sdk 误报根因)
+            comp = attack_chains_summary.get('completeness')
+            signals.append(f"Attack chains: {attack_chains_summary['chain_count']} "
+                           f"(completeness={comp if comp is not None else '?'} — "
+                           f"below 0.5 means incomplete, NOT conclusive)")
             signals.append(f"  Summary: {attack_chains_summary.get('summary', '')[:200]}")
 
         # 子图判决汇总
@@ -427,6 +710,9 @@ class BatchAnalyzerV20Voting:
                 signals.append(f"  Malicious: {', '.join(mal_names[:5])}")
             if sus_names:
                 signals.append(f"  Suspicious: {', '.join(sus_names[:5])}")
+
+        # 2026-11 证据完整性:可疑/恶意子图的函数代码原文（见 _flagged_code_signals）
+        signals.extend(_flagged_code_signals(vs, subgraph_jsons))
 
         # 关键污点链
         all_chains = []
@@ -467,6 +753,33 @@ and make a holistic judgment.
 Category: {voting_result['final_category']}
 Risk: {voting_result['final_risk_score']}, Confidence: {voting_result['final_confidence']}
 Reason: {voting_result.get('voting_summary', '')}
+
+## Decision Criteria (apply strictly)
+- MALICIOUS — any ONE of:
+  * A STRONG taint chain exists: source is network/socket/deserialization/
+    decoded data, OR the sink is data-exfiltration — and no benign
+    explanation covers it. These chain shapes are rare in benign software.
+  * Code downloads/executes payloads, exfiltrates data, or backdoors
+    installs, even across multiple functions/files (you verified this
+    from the flagged code itself, not just from labels).
+  * Install-time (setup.py) code execution or exfiltration.
+  * Identity fraud: the distribution name does NOT exist on PyPI
+    (verification status "not_found") while claiming to be a real package.
+- SUSPICIOUS — dangerous-API usage with NO strong chain and a plausible
+  benign explanation. IMPORTANT: environment/file_read/user_input ->
+  exec/file_write chains are ROUTINE in build tools, plugin loaders and
+  test-data generators — such weak-source chains alone stay SUSPICIOUS
+  unless the flagged code itself shows malicious intent.
+  Corporate-prefixed or internal fork names missing from PyPI are NOT
+  identity fraud by themselves. Name-similarity (typosquat heuristics)
+  at "high" level alone is NOT proof — require the not_found status or
+  corroborating code evidence.
+- BENIGN — no taint chains, dangerous APIs clearly used in benign context.
+
+Do NOT default to SUSPICIOUS when a STRONG chain is present: a chain is
+structural evidence from the graph kernel, independent of your confidence.
+Do NOT upgrade to MALICIOUS on weak-source chains or name-similarity
+signals alone — that is how false positives happen.
 
 ## Your Task
 Consider ALL signals TOGETHER. A single strong signal may outweigh many weak ones.
@@ -625,6 +938,10 @@ Output JSON:
                     'rule_based_confidence': rule_based_result['confidence'],
                     'llm_used': False  # 标记：未使用LLM
                 }
+                # 2026-11 升级证据链：规则票同样携带污点链（升级门控统一口径）
+                _chains = subgraph_json.get('taint_chains') or []
+                verdict['taint_chain_count'] = len(_chains)
+                verdict['taint_chains'] = _chains[:3]
 
             subgraph_verdicts.append(verdict)
 
@@ -635,6 +952,9 @@ Output JSON:
         #    仅规则判 MALICIOUS（低优先级子图，无 LLM 复核）需 ≥2 个一致才升
         #    MALICIOUS，孤证降级计入 SUSPICIOUS——规则通道孤证不再判死整包
         # 3. 置信度真实化：由恶意占比与子图自身置信度计算，替换硬编码值
+        # 4. SUSPICIOUS 升级（2026-11）：可疑子图自带强污点链（强源→sink /
+        #    任意→外传）或增强通道 critical 佐证时 → MALICIOUS。
+        #    门控只认良性软件中罕见的链形态，environment→exec 不自动升级。
         total_count = max(len(subgraph_verdicts), 1)
 
         llm_malicious = [v for v in subgraph_verdicts
@@ -642,6 +962,20 @@ Output JSON:
         rule_malicious = [v for v in subgraph_verdicts
                           if v.get('final_verdict') == 'MALICIOUS' and not v.get('llm_used', False)]
         suspicious_verdicts = [v for v in subgraph_verdicts if v.get('final_verdict') == 'SUSPICIOUS']
+
+        # ===== 零容忍的强证据门控（2026-11，真实误报驱动）=====
+        # 见 _llm_malicious_weak_only：LLM 恶意子图必须至少有一个满足
+        # escalation_gate，否则降 SUSPICIOUS（exec(open(_version.py)) 惯用法）。
+        _weak_llm_mal = _llm_malicious_weak_only(llm_malicious, enhanced_detection_result)
+        if _weak_llm_mal:
+            for v in _weak_llm_mal:
+                v['final_verdict'] = 'SUSPICIOUS'
+                v['is_malicious'] = False
+                v['demoted_reason'] = ('LLM判恶意但仅有弱污点链'
+                                       '（如 file_read→exec 属构建工具惯用法）')
+            print(f"          [零容忍门控] {len(_weak_llm_mal)} 个LLM恶意子图仅有弱链，降级为可疑")
+            suspicious_verdicts.extend(_weak_llm_mal)
+            llm_malicious = []
 
         # ===== 跨通道交叉验证（2026-10，真实良性库测试驱动）=====
         # 单通道LLM + 零容忍，对"本身就含代码执行原语的库"(cffi的execfile、
@@ -713,12 +1047,43 @@ Output JSON:
                 voting_summary = (f"检测到 {malicious_count} 个恶意攻击链（子图，其中LLM复核 {len(llm_malicious)} 个），"
                                   f"按零容忍原则判定为恶意包")
         elif suspicious_count > 0:
-            final_category = "SUSPICIOUS"
-            sus_ratio = suspicious_count / total_count
-            final_risk_score = round(0.40 + sus_ratio * 0.20, 3)
-            final_confidence = round(min(1.0, 0.45 + 0.30 * sus_ratio
-                                         + 0.10 * _avg_conf(suspicious_verdicts)), 3)
-            voting_summary = f"检测到 {suspicious_count} 个可疑子图，但无明确恶意攻击链，判定为可疑包"
+            # 2026-11 SUSPICIOUS 升级机制：可疑不再是终点。
+            # 升级条件（证据必须与可疑子图同源——链就挂在该可疑子图上）：
+            #   A. 可疑子图自带满足升级门控的污点链（强源→sink 或 任意→外传）
+            #      ——图内核与 LLM/规则双通道独立佐证同一函数
+            #   B. 增强通道 critical 佐证（high 含低精度 live 索引信号，
+            #      用它会循环论证，不用）
+            escalation_reasons = []
+            escalated_verdicts = []
+            for v in suspicious_verdicts:
+                reason = escalation_gate(v.get('taint_chains'))
+                if reason:
+                    escalation_reasons.append(f"{v.get('subgraph_name', '?')}: {reason}")
+                    escalated_verdicts.append(v)
+            if not escalation_reasons and enhanced_strong:
+                escalation_reasons.append("增强通道 critical 信号佐证可疑子图")
+                escalated_verdicts = list(suspicious_verdicts)
+
+            if escalation_reasons:
+                final_category = "MALICIOUS"
+                n_esc = min(len(escalated_verdicts), 3)
+                final_risk_score = round(0.72 + 0.03 * n_esc, 3)
+                final_confidence = round(min(1.0, 0.60 + 0.06 * n_esc
+                                             + 0.05 * _avg_conf(suspicious_verdicts)), 3)
+                voting_summary = (f"[升级] 可疑→恶意: {'; '.join(escalation_reasons[:3])}"
+                                  f"（{len(escalated_verdicts)}/{suspicious_count} 个可疑子图有图内核级佐证）")
+                for v in escalated_verdicts:
+                    v['escalated'] = True
+                print(f"          [升级] SUSPICIOUS → MALICIOUS")
+                for r in escalation_reasons[:3]:
+                    print(f"            -> {r}")
+            else:
+                final_category = "SUSPICIOUS"
+                sus_ratio = suspicious_count / total_count
+                final_risk_score = round(0.40 + sus_ratio * 0.20, 3)
+                final_confidence = round(min(1.0, 0.45 + 0.30 * sus_ratio
+                                             + 0.10 * _avg_conf(suspicious_verdicts)), 3)
+                voting_summary = f"检测到 {suspicious_count} 个可疑子图，无完整污点链佐证，判定为可疑包"
         elif benign_count == 0 and error_count > 0:
             # 全部子图分析失败：不能当良性输出
             final_category = "ANALYSIS_FAILED"
@@ -805,6 +1170,14 @@ Output JSON:
         # 只有真正的 LLM 判决才算"LLM复核"；API失败/解析失败的规则回退
         # 必须按规则票处理（cffi 曾因回退票被当LLM票直接判 MALICIOUS）
         verdict['llm_used'] = not verdict.get('fallback', False)
+
+        # 2026-11 升级证据链修复：verdict 必须携带污点链。
+        # 此前 _package_level_analysis 从 verdicts 收集 taint_chains，而
+        # verdicts 从未携带过 → 包级 LLM 从未见过任何污点链，最关键的
+        # 升级证据在其视野之外（SUSPICIOUS 无法升级的根因之一）。
+        chains = subgraph_json.get('taint_chains') or []
+        verdict['taint_chain_count'] = len(chains)
+        verdict['taint_chains'] = chains[:3]  # 上限防内存膨胀，格式化层再裁剪
         return verdict
 
     def _classify_zero_subgraph_case(
@@ -1412,6 +1785,21 @@ Output JSON:
             print(f"        [WARN] 未找到子图目录: {subgraphs_dir}")
             return subgraph_jsons
 
+        # 2026-11 性能修复:函数摘要文件在循环外读一次并建索引。
+        # 原实现每个子图都重新 read_text + 线性遍历 summaries——
+        # ag2 有 1136 个子图,仅这一项就是 1136 次文件 IO + 百万级比较。
+        _summaries_by_name = {}
+        _summ_file = Path(package_dir) / '.ddg_output' / 'function_summaries.json'
+        if _summ_file.exists():
+            try:
+                _sdata = json.loads(_summ_file.read_text(encoding='utf-8'))
+                for _sk, _sv in (_sdata.get('summaries') or {}).items():
+                    _n = _sv.get('name')
+                    if _n and _n not in _summaries_by_name:
+                        _summaries_by_name[_n] = _sv
+            except Exception:
+                _summaries_by_name = {}
+
         # 读取每个子图的edges.json和nodes.json
         for subgraph_dir in sorted(subgraphs_dir.iterdir()):
             if subgraph_dir.is_dir():
@@ -1440,13 +1828,18 @@ Output JSON:
                     ]
 
                     # 构建数据流路径（从edges中）
+                    # 2026-11 性能修复:原实现对每条边做两次 next() 线性扫描
+                    # (O(E×N)),千节点级子图上直接爆炸——ag2 有 1136 个子图,
+                    # 单包分析超时 15 分钟。改 dict 索引 O(E+N)。
+                    _node_index = {n.get('node_id'): n for n in nodes_data
+                                   if n.get('node_id')}
                     data_flow_paths = []
                     for edge in edges_data:
                         from_node = edge.get('from_node', '')
                         to_node = edge.get('to_node', '')
                         if from_node and to_node:
-                            from_node_data = next((n for n in nodes_data if n.get('node_id') == from_node), None)
-                            to_node_data = next((n for n in nodes_data if n.get('node_id') == to_node), None)
+                            from_node_data = _node_index.get(from_node)
+                            to_node_data = _node_index.get(to_node)
                             if from_node_data and to_node_data:
                                 data_flow_paths.append([
                                     {'code': from_node_data.get('code', ''), 'file': from_node_data.get('file', '')},  # Bug #13修复
@@ -1463,12 +1856,16 @@ Output JSON:
 
                     # 2026-10 图内核重构：真实污点追踪（Source→Sink 反向 BFS）
                     # 替代原先"每条边一个二元路径"的伪数据流
+                    # 2026-11 性能门控:无危险节点的子图跳过污点分析——
+                    # 污点从 sink 反向 BFS,没有 sink 的图跑一遍纯属浪费。
+                    # ag2(1136 子图)里绝大多数函数没有任何危险调用。
                     taint_chains = []
-                    try:
-                        from src.taint_engine import analyze as taint_analyze
-                        taint_chains = taint_analyze(nodes_data, edges_data)
-                    except Exception as taint_err:
-                        print(f"        [WARN] 污点追踪失败({subgraph_dir.name}): {taint_err}")
+                    if dangerous_nodes:
+                        try:
+                            from src.taint_engine import analyze as taint_analyze
+                            taint_chains = taint_analyze(nodes_data, edges_data)
+                        except Exception as taint_err:
+                            print(f"        [WARN] 污点追踪失败({subgraph_dir.name}): {taint_err}")
 
                     # 2026-11 函数级分割:从子图的 function 节点取函数名
                     func_name = None
@@ -1477,18 +1874,8 @@ Output JSON:
                             func_name = node['function_name']
                             break
 
-                    # 从函数摘要文件读取对应摘要
-                    func_summary = None
-                    summaries_file = Path(package_dir) / '.ddg_output' / 'function_summaries.json'
-                    if summaries_file.exists() and func_name:
-                        try:
-                            sdata = json.loads(summaries_file.read_text(encoding='utf-8'))
-                            for sk, sv in sdata.get('summaries', {}).items():
-                                if sv.get('name') == func_name:
-                                    func_summary = sv
-                                    break
-                        except Exception:
-                            pass
+                    # 从函数摘要索引取（循环外已加载）
+                    func_summary = _summaries_by_name.get(func_name) if func_name else None
 
                     # 合并为期望的格式
                     subgraph_data = {
@@ -1503,6 +1890,21 @@ Output JSON:
                         'function_summary': func_summary,
                     }
                     subgraph_jsons.append(subgraph_data)
+
+        # 2026-11 子图预算门控:超大 monorepo(ag2 有 1136 个函数级子图)
+        # 的下游成本(规则评分 + 投票 + 序列化)线性爆炸。按"危险节点数"
+        # 降序保留最危险的前 MAX_SUBGRAPHS_ANALYZED 个——恶意信号集中在
+        # 有危险调用的函数里,丢弃的绝大多数是纯工具函数。
+        _total_read = len(subgraph_jsons)
+        if _total_read > MAX_SUBGRAPHS_ANALYZED:
+            subgraph_jsons.sort(
+                key=lambda s: (len(s.get('dangerous_nodes') or []),
+                               len(s.get('taint_chains') or [])),
+                reverse=True)
+            subgraph_jsons = subgraph_jsons[:MAX_SUBGRAPHS_ANALYZED]
+            print(f"        [预算门控] 子图 {_total_read} 个超过上限 "
+                  f"{MAX_SUBGRAPHS_ANALYZED}，按危险节点数保留前 "
+                  f"{MAX_SUBGRAPHS_ANALYZED} 个")
 
         print(f"        读取到 {len(subgraph_jsons)} 个子图"
               f"（含污点链 {sum(len(s.get('taint_chains') or []) for s in subgraph_jsons)} 条）")

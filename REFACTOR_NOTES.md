@@ -858,3 +858,76 @@ def main():
 
 最终结构: 核心代码(src/) / 投票(SOLUTION_B_VOTING/) / 测试(tests/ 10文件) /
 提示词(prompts/) / 配置(config/ docs/) / 评测数据(output/ 5个数据集) / 部署(scripts/)。
+
+---
+
+# 大规模服务器评测(2026-11-02)
+
+在团队服务器(隔离评测环境)上跑了 100 恶意 + 100 良性的正式评测。
+数据源: chq 的完整数据集
+环境: Python 3.14 (miniconda), glm-4-flash, --verify-pypi
+
+## 结果
+
+| | 数量 | 检测 |
+|---|---|---|
+| 恶意 100 | **100/100 MALICIOUS** | 召回 **100%** |
+| 良性 100 | **100/100 BENIGN** | 硬误报 **0%** |
+
+## 检测归因(恶意集)
+- PyPI 索引核验: 100 包命中
+- typosquat/名字不匹配: 60 次命中
+- 代码/安装脚本信号: 10 次命中
+- 全部 0 ERROR
+
+## 评测脚本位置
+服务器: /disk2/wch/run_benign.sh, /disk2/wch/run_mal.sh
+结果: /disk2/wch/eval_output/results/
+日志: /disk2/wch/eval_output/*_run.log
+
+---
+
+# 第十一轮: SUSPICIOUS 升级机制(2026-11)
+
+## 根因(5000 包 Pass 1 数据驱动)
+3109 包中 2080 (67%) 停在 SUSPICIOUS,仅 22% MALICIOUS。判决模式分析:
+2045/2080 = "LLM判可疑(1个子图)"。函数级分割后恶意包必有若干"含危险
+API 的函数",弱模型逐函数保守判 SUSPICIOUS,投票层"1可疑→包可疑"无升级路径。
+
+**关键 bug**: `_package_level_analysis` 从 verdicts 收集 taint_chains,
+但 verdicts 从未携带过 → 包级 LLM(本该聪明升级的通道)从未见过任何污点链,
+其判决永远基于"1个可疑子图,无链"→ 保守回声 SUSPICIOUS。
+
+## 实现
+1. **verdict 携带链证据**: `_classify_one_high_priority` 与低优先级规则
+   路径均附加 `taint_chain_count` + `taint_chains[:3]`;简化 verdict 补
+   `taint_categories`(离线重判依赖)。
+2. **升级门控下沉 `src/taint_engine.escalation_gate`**(在线/离线共用):
+   - 强源(network_response/socket_recv/deserialization/decoded_data)→任意 sink
+   - 任意源→外传 sink(data_exfiltration,数据流出即窃取)
+   - 明确排除 environment/file_read→exec(构建工具日常形态,自动升级会造成
+     cffi 类误报)
+3. **投票层升级**(elif suspicious_count 分支): 可疑子图自带满足门控的链
+   → MALICIOUS(risk≥0.72, conf≥0.62, 记录 escalation_reason);
+   增强通道 critical 佐证同样升级(high 不用——循环论证教训)。
+4. **包级 LLM prompt 硬化**: 显式判决判据(MALICIOUS/SUSPICIOUS/BENIGN
+   各自条件),"complete chain 存在时不得默认 SUSPICIOUS"。
+
+## 验证
+- tests/test_escalation.py 16 项全过(强源4/外传2/弱链不升4/边界4/常量2)
+- 全套回归 9 个测试文件全过
+- scripts/rejudge_suspicious.py 本地 fixture 5 场景全对(Tier1/Tier2/
+  弱链不升/缺数据保持/非SUSPICIOUS不动)
+
+## 离线重判
+`scripts/rejudge_suspicious.py <results.jsonl> [--extract-base DIR] [--apply]`
+对已完成批次不重跑、不调 LLM:
+- Tier 1 同源门控: 新数据 verdicts 自带 taint_categories
+- Tier 2 包级门控: 老数据读 .ddg_output/taint_chains.json(标记
+  package_level,弱于同源口径)
+- 输出前后分布对比 + 升级明细
+
+## 待办(服务器恢复后)
+1. 同步代码到服务器,对 5000 包 JSONL 跑离线重判,量化升级率
+2. 良性留出集重跑(防误报回潮——门控设计针对 cffi 类,需实测确认)
+3. 后续批次自动生效(新代码 verdicts 自带链证据,走 Tier 1 同源口径)

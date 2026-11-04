@@ -132,6 +132,89 @@ def test_name_mismatch_critical():
     print("[OK] 发行名/元数据不一致 → critical")
 
 
+def test_name_mismatch_from_setup_py_not_critical():
+    """修复回归(真实误报 acryl_datahub_actions):
+    PKG-INFO 的 Name 被 setup.py 解析结果覆盖 → 伪造出 name_mismatch critical。
+    权威元数据必须优先,setup.py 来源的不一致只能是 medium 弱信号。"""
+    det = EnhancedSecurityDetector()
+    # PKG-INFO 名字正确;setup.py 含一行会被宽松解析器吞掉的 name 行
+    d = make_dir({
+        'PKG-INFO': 'Name: acryl-datahub-actions\nVersion: 1.6.0.7\n',
+        'setup.py': 'Name: "hello_world"\n',
+    })
+    meta = det._analyze_metadata(d)
+    assert meta['package_name'] == 'acryl-datahub-actions', \
+        f"PKG-INFO 应优先, 实得 {meta['package_name']!r}"
+    assert meta['package_name_source'] == 'pkg_info', meta['package_name_source']
+
+    r = det.analyze_package(d, dist_name='acryl_datahub_actions-1.6.0.7')
+    assert r['overall_threat_level'] != 'critical', \
+        f"名称一致不应判 critical: {r['overall_threat_level']}"
+    assert not any(t.get('type') == 'name_mismatch' for t in r['threats_found']), \
+        f"归一化后名称一致, 不应报 name_mismatch: {r['threats_found']}"
+    shutil.rmtree(d, ignore_errors=True)
+
+    # 反向:只有 setup.py 提供名字时,不一致降为 medium 弱信号
+    d2 = make_dir({'setup.py': 'Name: hello_world\n'})
+    meta2 = det._analyze_metadata(d2)
+    assert meta2['package_name_source'] == 'setup_py'
+    r2 = det._analyze_distribution_name(
+        'somepkg-1.0', meta2['package_name'],
+        metadata_source=meta2['package_name_source'])
+    mm = [t for t in r2['threats'] if t.get('type') == 'name_mismatch']
+    assert mm and mm[0]['severity'] == 'medium', f"应为 medium 弱信号: {mm}"
+    assert mm[0]['metadata_source'] == 'setup_py'
+    shutil.rmtree(d2, ignore_errors=True)
+    print("[OK] PKG-INFO 优先 + setup.py 名称不一致不判死")
+
+
+def test_weak_signals_cannot_sum_to_critical():
+    """修复回归(真实误报 a2a_sdk):medium(4)+high(7)=11 曾累加成 critical
+    → 短路判死。critical 必须有真实 critical 单信号支撑。"""
+    det = EnhancedSecurityDetector()
+    d = make_dir({'PKG-INFO': 'Name: a2a_sdk\nVersion: 1.1.0\n'})
+    det._analyze_dependencies = lambda _d: {
+        'has_threats': True, 'threat_level': 'medium',
+        'threats': [{'type': 'suspicious_dependency', 'severity': 'medium'}]}
+    det._analyze_distribution_name = lambda *a, **kw: {
+        'has_threats': True, 'threat_level': 'high',
+        'threats': [{'type': 'typosquatting', 'severity': 'high', 'source': 'live'}]}
+    r = det.analyze_package(d, dist_name='a2a_sdk-1.1.0')
+    assert r['overall_threat_level'] != 'critical', \
+        f"无 critical 单信号时不得判 critical, 实得 {r['overall_threat_level']}"
+    assert r['overall_threat_level'] == 'high', f"应为 high: {r['overall_threat_level']}"
+    shutil.rmtree(d, ignore_errors=True)
+    print("[OK] 弱信号叠加不造 critical")
+
+
+def test_pkg_info_body_does_not_override_header():
+    """修复回归(真实误报 acryl_datahub_actions):PKG-INFO 头部的 Name 被
+    Description 正文里的 yaml 示例(`name: hello_world`)覆盖, 伪造出
+    name_mismatch critical。头部字段必须首见优先且正文不解析。"""
+    det = EnhancedSecurityDetector()
+    pkg_info = (
+        'Metadata-Version: 2.4\n'
+        'Name: acryl-datahub-actions\n'
+        'Version: 1.6.0.7\n'
+        'Summary: An action framework\n'
+        '\n'
+        'Example config:\n'
+        'name: hello_world\n'
+        'version: 1.0\n'
+    )
+    d = make_dir({'PKG-INFO': pkg_info})
+    meta = det._analyze_metadata(d)
+    assert meta['package_name'] == 'acryl-datahub-actions', \
+        f"头部 Name 不应被正文覆盖, 实得 {meta['package_name']!r}"
+    assert meta['package_version'] == '1.6.0.7'
+
+    r = det.analyze_package(d, dist_name='acryl_datahub_actions-1.6.0.7')
+    assert not any(t.get('type') == 'name_mismatch' for t in r['threats_found']), \
+        f"名称归一化后一致, 不应报 name_mismatch: {r['threats_found']}"
+    shutil.rmtree(d, ignore_errors=True)
+    print("[OK] PKG-INFO 正文不覆盖头部 Name")
+
+
 def test_typosquat_dist_name():
     """修复回归(真实样本 python-dateutils):与流行包编辑距离<=1 → critical"""
     det = EnhancedSecurityDetector()
@@ -184,6 +267,9 @@ if __name__ == '__main__':
     test_pyproject_dependencies()
     test_install_time_exfiltration()
     test_name_mismatch_critical()
+    test_name_mismatch_from_setup_py_not_critical()
+    test_weak_signals_cannot_sum_to_critical()
+    test_pkg_info_body_does_not_override_header()
     test_typosquat_dist_name()
     test_pypi_verify_hook()
     test_benign_genuine_name_not_flagged()

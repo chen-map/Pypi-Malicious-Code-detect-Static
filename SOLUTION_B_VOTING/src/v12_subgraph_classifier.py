@@ -241,14 +241,17 @@ class V12SubgraphClassifier:
             ]
 
             # 提取数据流路径（从edges中构建）
+            # 2026-11 性能修复:原实现 O(E×N)(每条边两次线性扫描),
+            # 千节点子图上爆炸。改 dict 索引 O(E+N)。
+            _node_index = {n.get('node_id'): n for n in nodes if n.get('node_id')}
             data_flow_paths = []
             for edge in edges:
                 from_node = edge.get('from_node', '')
                 to_node = edge.get('to_node', '')
                 if from_node and to_node:
                     # 查找节点详情
-                    from_node_data = next((n for n in nodes if n.get('node_id') == from_node), None)
-                    to_node_data = next((n for n in nodes if n.get('node_id') == to_node), None)
+                    from_node_data = _node_index.get(from_node)
+                    to_node_data = _node_index.get(to_node)
                     if from_node_data and to_node_data:
                         data_flow_paths.append([
                             {'code': from_node_data.get('code', ''), 'file': from_node_data.get('file', '')},
