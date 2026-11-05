@@ -337,6 +337,44 @@ gates (weak chains cannot convict, idiom knowledge does not release true
 malware) — these are exactly the behaviors that regressed under time pressure
 during development, which is why they are tests now.
 
+
+---
+
+## Current Ceiling & Roadmap
+
+Measured recall by graph size (500-package run, current code):
+
+| Graph size | Packages | Detection |
+|---|---|---|
+| ≤ 150 nodes | 214 | **99.1%** |
+| 151–1500 nodes | 19 | 63% |
+| > 1500 nodes | 19 | 21% |
+| **Overall (majority vote)** | 254 | **89.4%** |
+
+Small packages are essentially saturated. The ceiling is now **information
+loss and missing graph semantics on medium/large packages** — not the model,
+and not the chain-building method. Two workstreams form the next phase:
+
+**Phase A — block analysis for large graphs** (code exists in
+`src/package_graph_analysis.py`, integration pending): split graphs by
+file/function into ≤500-node blocks, analyze each block independently,
+merge verdicts. Expected to lift mid/large-package recall toward the
+small-package ceiling.
+
+**Phase B — missing edge semantics.** The model can only build chains the
+graph supports. Four edge classes that real attacks use are incomplete:
+
+| Missing edges | Real attack shape | Status |
+|---|---|---|
+| Global / module-level shared state | module A writes `CONFIG`, module B reads then `exec`s | not modeled — chains break |
+| Unresolved dynamic call targets | `dispatcher[name](payload)` | partial (known patterns only) |
+| Deep cross-function argument passing | `f(g(h(payload)))` | partial (`arg_mappings` coverage) |
+| Exception paths | `except: exec(e)` | not modeled |
+
+Each recovered edge class historically lifted recall by a measurable step
+(statement-sequence edges alone: +17%); these four are the next steps on
+the same path.
+
 ---
 
 ## Known Limitations
