@@ -13,6 +13,8 @@
 
 *SSO pre-filter · Three-layer CPG · LLM-constructed attack chains · Program-verified evidence · Two-stage heterogeneous models*
 
+[English](README.md) | [简体中文](README_zh.md)
+
 </div>
 
 ---
