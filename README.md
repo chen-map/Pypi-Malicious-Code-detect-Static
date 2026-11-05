@@ -51,56 +51,37 @@ And one governing constraint:
 
 ## Architecture
 
-```
-                    ┌─────────────────────────────────────────────┐
- .tar.gz / dir ───► │ ① SSO Pre-Filter (AST, capability-neutral)  │
-                    │   security-sensitive operations per file    │
-                    │   alias/getattr/globals resolution          │
-                    │   → selects files for graph construction    │
-                    └──────────────────┬──────────────────────────┘
-                                       ▼
-                    ┌─────────────────────────────────────────────┐
-                    │ ② Graph Construction (trimmed DDG)          │
-                    │   typed edges: data/control/call/param/ret  │
-                    │   + statement-sequence edges                │
-                    │   + function summaries (param→sink, return) │
-                    │   + AST call-target resolution              │
-                    │   PyPI-unique: setup.py & import-time scope │
-                    └──────────────────┬──────────────────────────┘
-                                       ▼
-                    ┌─────────────────────────────────────────────┐
-                    │ ③ Graph Digest (compact, verifiable view)   │
-                    │   short IDs (hash-shuffled: no order bias)  │
-                    │   node types · function map · scope flows   │
-                    │   ISOLATED PAYLOAD NODES · IOC literals     │
-                    │   no danger labels (no prompt bias)         │
-                    └──────────────────┬──────────────────────────┘
-                                       ▼
-        ┌───────────────────────────────────────────────────────────────┐
-        │ ④ Stage 1 — Small Model Builds Chains (GLM-4-Flash)           │
-        │   reads the digest, walks edges, proposes attack paths        │
-        └──────────────────┬────────────────────────────────────────────┘
-                           ▼
-        ┌───────────────────────────────────────────────────────────────┐
-        │ ⑤ Program Verification (the honesty layer)                    │
-        │   node IDs must exist · every hop must be a real edge         │
-        │   partial paths accepted · single-node evidence requires      │
-        │   a hostile literal in the code (deterministic check)         │
-        │   hallucinated chains → rejected, never reach the judge       │
-        └──────────────────┬────────────────────────────────────────────┘
-                           ▼
-        ┌───────────────────────────────────────────────────────────────┐
-        │ ⑥ Stage 2 — Strong Model Judges (GLM-4-Plus)                  │
-        │   sees only verified paths + flagged source code              │
-        │   domain idioms (setuptools-scm, version detection)           │
-        │   package self-description → intent-vs-behavior match         │
-        └──────────────────┬────────────────────────────────────────────┘
-                           ▼
-        ┌───────────────────────────────────────────────────────────────┐
-        │ ⑦ Evidence Gates + Final Integrity Check                      │
-        │   MALICIOUS w/o structural support → demoted SUSPICIOUS       │
-        │   factual evidence (PyPI 404 / install hooks) bypasses model  │
-        └───────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    IN([".tar.gz / source dir"]) --> EX["extract<br/>(tar-slip protected)"]
+
+    EX --> SSO["① SSO PRE-FILTER<br/>AST walk — capability neutral<br/>alias / getattr / globals resolution<br/>tags: process_spawn · code_eval · network · decode ..."]
+    SSO -- "files_with_sso<br/>(8-23% of files)" --> DDG["② DDG BUILDER — trimmed graph<br/>typed edges: data / call / param / return<br/>+ statement-sequence edges (next_stmt)<br/>+ function summaries (param→sink)<br/>+ AST call-target resolution"]
+
+    DDG -- "nodes.json · edges.json<br/>function_summaries.json" --> DIG["③ GRAPH DIGEST<br/>hash-shuffled short IDs (N1..Nn)<br/>NODES with [type] and line<br/>EDGES data-flow · STRUCT-EDGES context<br/>FUNCTIONS map · CROSS-SCOPE FLOWS<br/>ISOLATED PAYLOAD NODES · IOC LITERALS<br/>(no danger labels — no prompt bias)"]
+
+    EX --> ENH["①b ENHANCED DETECTION — cheap, runs first<br/>install hooks · PyPI 404 · typosquat · clone"]
+
+    DIG -- "digest text" --> S1["④ STAGE 1 — CHAIN EXTRACTION<br/>GLM-4-Flash (small model)<br/>entry points → sensitive ops<br/>walk edges hop by hop"]
+
+    S1 -- "proposed paths" --> V["⑤ PROGRAM VERIFICATION<br/>every node ID exists<br/>every hop is a real edge<br/>partial paths kept<br/>single-node ⇒ hostile-literal gate"]
+
+    V -- "verified paths" --> S2["⑥ STAGE 2 — ADJUDICATION<br/>GLM-4-Plus (strong model)<br/>verified paths + flagged source<br/>idiom knowledge · intent-vs-behavior"]
+
+    ENH -- "critical: factual evidence" --> SHORT["short-circuit MALICIOUS<br/>(skips graph + model)"]
+
+    S2 --> GATES["⑦ EVIDENCE GATES<br/>weak chain (env→exec) never convicts<br/>verdict normalization<br/>final integrity check"]
+
+    V -- "no valid paths" --> DEMOTE["MALICIOUS w/o verified paths<br/>⇒ SUSPICIOUS"]
+
+    GATES --> OUT(["MALICIOUS / SUSPICIOUS / BENIGN<br/>OBFUSCATED / ANALYSIS_FAILED<br/>+ verified chains as evidence"])
+    SHORT --> OUT
+    DEMOTE --> GATES
+
+    style S1 fill:#e8f0fe
+    style S2 fill:#f3e8fd
+    style V fill:#e6f4ea
+    style SHORT fill:#ffd7d7
 ```
 
 ---
