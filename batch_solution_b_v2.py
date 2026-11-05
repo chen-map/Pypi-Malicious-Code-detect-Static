@@ -149,7 +149,8 @@ def _flagged_code_signals(verdicts, subgraph_jsons, max_funcs=4, max_chars=1200)
     return lines_out
 
 
-def _llm_escalation_corroborated(enhanced_detection_result, voting_result):
+def _llm_escalation_corroborated(enhanced_detection_result, voting_result,
+                                 ignore_pypi_gate=False):
     """包级 LLM 升级 MALICIOUS 的机械复核（2026-11）。
 
     弱模型实测会无视 prompt 判据（良性 fork 名被 "typosquatting high" 或
@@ -173,7 +174,7 @@ def _llm_escalation_corroborated(enhanced_detection_result, voting_result):
         return True, '增强通道 critical'
     if strong_chain:
         return True, '可疑子图自带强污点链'
-    if pypi_st == 'not_found':
+    if pypi_st == 'not_found' and not ignore_pypi_gate:
         return True, 'PyPI not_found'
     return False, (f'无结构性证据(ed={ed_lvl}, pypi={pypi_st or "n/a"}, '
                    f'强链={"Y" if strong_chain else "N"})')
@@ -211,7 +212,7 @@ class BatchAnalyzerV20Voting:
     """批量分析器 V20 - 投票架构"""
 
     def __init__(self, tarfile_dir: str, llm: str = 'glm', api_key: str = '', count: int = 100, extract_base: str = 'output/packages', skip_rule_scoring: bool = False, parallel_workers: int = 1, seed: int = 42, verify_pypi: bool = False, use_llm_cache: bool = True, sandbox: bool = False,
-                llm_model: str = 'glm-4-flashx'):
+                llm_model: str = 'glm-4-flashx', ignore_pypi_gate: bool = False):
         self.tarfile_dir = Path(tarfile_dir)
         self.llm = llm
         self.api_key = api_key
@@ -221,6 +222,9 @@ class BatchAnalyzerV20Voting:
         self.parallel_workers = parallel_workers  # 并行线程数（>1 时高优先级子图并行LLM分析）
         self.seed = seed  # 抽样随机种子（可复现评测）
         self.verify_pypi = verify_pypi  # 是否核验包是否存在于 PyPI（名称抢注判据）
+        # 消融开关（--no-pypi-gate）：registry 身份不参与判决，用于评估
+        # 纯代码分析（图内核 + LLM）在不联网条件下的检出能力
+        self.ignore_pypi_gate = ignore_pypi_gate
         self.use_llm_cache = use_llm_cache  # LLM 判决缓存（--no-llm-cache 关闭）
         self.sandbox = sandbox  # 沙箱行为探针(执行 setup.py,仅隔离环境启用!)
         self.llm_model = llm_model  # LLM 模型名(--llm-model)
@@ -246,6 +250,7 @@ class BatchAnalyzerV20Voting:
             'parallel_workers': self.parallel_workers,
             'seed': self.seed,
             'verify_pypi': self.verify_pypi,
+            'ignore_pypi_gate': self.ignore_pypi_gate,
             'use_llm_cache': self.use_llm_cache,
             'sandbox': self.sandbox,
             'llm_model': self.llm_model,
@@ -418,7 +423,8 @@ class BatchAnalyzerV20Voting:
         print(f"[Step 2/6] 增强检测（setup.py/依赖/元数据/包名）...")
         enhanced_detection_result = self.enhanced_detector.analyze_package(
             package_dir, dist_name=dist_name or package_name,
-            verify_pypi=self.verify_pypi)
+            verify_pypi=self.verify_pypi,
+            ignore_pypi_gate=self.ignore_pypi_gate)
 
         def _enhanced_shortcut(report):
             return {
@@ -591,7 +597,8 @@ class BatchAnalyzerV20Voting:
                     # MALICIOUS。结构性证据不足时,LLM 升级一律降回 SUSPICIOUS。
                     if (new_cat == 'MALICIOUS' and old_cat != 'MALICIOUS'):
                         ok, why = _llm_escalation_corroborated(
-                            enhanced_detection_result, voting_result)
+                            enhanced_detection_result, voting_result,
+                            ignore_pypi_gate=self.ignore_pypi_gate)
                         if not ok:
                             new_cat = 'SUSPICIOUS'
                             voting_result['llm_escalation_demoted'] = True
@@ -616,7 +623,8 @@ class BatchAnalyzerV20Voting:
         # 做检查，其他路径（如投票层零容忍）漏网——ag2 就是这样被判死的。
         if voting_result['final_category'] == 'MALICIOUS':
             _ok, _why = _llm_escalation_corroborated(
-                enhanced_detection_result, voting_result)
+                enhanced_detection_result, voting_result,
+                ignore_pypi_gate=self.ignore_pypi_gate)
             if not _ok:
                 print(f"        [最终保险] MALICIOUS 无结构性证据({_why}) → SUSPICIOUS")
                 voting_result['final_category'] = 'SUSPICIOUS'
@@ -1452,33 +1460,69 @@ Output JSON:
             }
 
     def _extract_tarfile(self, tarfile: Path, package_dir: Path):
-        """解压tarfile（filter='data' 防路径穿越；分析对象本身是恶意样本）"""
+        """解压发行包（filter='data' 防路径穿越；分析对象本身是恶意样本）
+
+        2026-11:按文件魔数识别真实格式。此前一律用 tarfile 打开,
+        导致 wheel（zip 格式）报 "method gz: ReadError" 并被记为
+        ANALYSIS_FAILED——5000 包语料里约 5% 是 wheel。魔数判断比
+        扩展名可靠（样本常把 .whl 命名为 .tar.gz）。
+        """
         import tarfile as tf_module
-        if not package_dir.exists():
-            # Create extract base directory if needed
-            package_dir.parent.mkdir(parents=True, exist_ok=True)
-            # Extract to parent directory (extract_base)
-            with tf_module.open(tarfile) as tf:
-                try:
-                    # filter='data': 拒绝绝对路径/../穿越/设备文件，防 tar-slip
-                    tf.extractall(path=str(package_dir.parent), filter='data')
-                except TypeError:
-                    # Python < 3.12 无 filter 参数
-                    tf.extractall(path=str(package_dir.parent))
+        import zipfile
+        if package_dir.exists():
+            return
+        package_dir.parent.mkdir(parents=True, exist_ok=True)
+
+        # 魔数探测: PK\x03\x04 = zip/wheel; \x1f\x8b = gzip; 其余按 tar
+        is_zip = False
+        try:
+            with open(tarfile, 'rb') as _f:
+                is_zip = _f.read(4)[:2] == b'PK'
+        except OSError:
+            pass
+
+        if is_zip:
+            with zipfile.ZipFile(tarfile) as zf:
+                for member in zf.infolist():
+                    name = member.filename.replace('\\', '/')
+                    # 防 zip-slip: 拒绝绝对路径与 .. 穿越
+                    if name.startswith('/') or '..' in name.split('/'):
+                        continue
+                    zf.extract(member, path=str(package_dir.parent))
+            return
+
+        with tf_module.open(tarfile) as tf:
+            try:
+                # filter='data': 拒绝绝对路径/../穿越/设备文件，防 tar-slip
+                tf.extractall(path=str(package_dir.parent), filter='data')
+            except TypeError:
+                # Python < 3.12 无 filter 参数
+                tf.extractall(path=str(package_dir.parent))
 
     def _resolve_extracted_dir(self, tarfile: Path, extract_base: Path) -> Optional[Path]:
-        """tar 内顶级目录名与 tar 文件名不一致时，解析实际解压目录"""
+        """包内顶级目录名与文件名不一致时，解析实际解压目录
+
+        2026-11: 兼容 zip/wheel（按魔数判断，与 _extract_tarfile 一致）。
+        """
         import tarfile as tf_module
+        import zipfile
         try:
-            with tf_module.open(tarfile) as tf:
-                for member in tf.getmembers():
-                    top = member.name.replace('\\', '/').split('/')[0]
-                    if top in ('.', '', '..'):
-                        continue
-                    candidate = extract_base / top
-                    if candidate.exists() and candidate.is_dir():
-                        return candidate
-                    break
+            with open(tarfile, 'rb') as _f:
+                is_zip = _f.read(4)[:2] == b'PK'
+            if is_zip:
+                with zipfile.ZipFile(tarfile) as zf:
+                    names = zf.namelist()
+            else:
+                with tf_module.open(tarfile) as tf:
+                    names = [m.name for m in tf.getmembers()]
+            for name in names:
+                top = name.replace('\\', '/').split('/')[0]
+                if top in ('.', '', '..'):
+                    continue
+                candidate = extract_base / top
+                if candidate.exists() and candidate.is_dir():
+                    return candidate
+                break
         except Exception:
             pass
         return None
@@ -2605,6 +2649,10 @@ def main():
                         help='禁用 LLM 判决缓存（默认开启：相同子图不重复调用）')
     parser.add_argument('--verify-pypi', action='store_true',
                         help='核验发行名是否存在于 PyPI 官方索引（识别名称抢注/被下架包，需联网）')
+    parser.add_argument('--no-pypi-gate', action='store_true',
+                        help='消融开关:registry 身份(404/未发布版本)不作为判决证据。'
+                             '用于评估纯代码分析(图内核+LLM)不依赖联网时的检出能力。'
+                             '仍会做核验并记录结果,只是不参与判决')
 
     args = parser.parse_args()
 
@@ -2620,7 +2668,8 @@ def main():
         verify_pypi=args.verify_pypi,
         use_llm_cache=not args.no_llm_cache,
         sandbox=args.sandbox,
-        llm_model=args.llm_model
+        llm_model=args.llm_model,
+        ignore_pypi_gate=args.no_pypi_gate
     )
 
     analyzer.analyze_all()

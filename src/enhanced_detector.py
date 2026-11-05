@@ -268,7 +268,8 @@ class EnhancedSecurityDetector:
         return best.get('severity', 'low')
 
     def analyze_package(self, extracted_dir: Path, dist_name: Optional[str] = None,
-                        verify_pypi: bool = False) -> Dict:
+                        verify_pypi: bool = False,
+                        ignore_pypi_gate: bool = False) -> Dict:
         """
         分析包的非代码威胁
 
@@ -364,7 +365,11 @@ class EnhancedSecurityDetector:
                     report['duplicate_check'] = {'status': 'unknown',
                                                  'reason': str(dup_err)[:100]}
 
-            if vr['status'] in ('not_found', 'unpublished_version'):
+            # 2026-11 消融开关:ignore_pypi_gate=True 时,registry 身份
+            # 不作为判决证据(仍记录在 pypi_verification 里供审计)。
+            # 用于评估"纯代码分析(图内核+LLM)不依赖联网也能抓到多少"。
+            if (vr['status'] in ('not_found', 'unpublished_version')
+                    and not ignore_pypi_gate):
                 report['distribution_analysis']['threats'].append({
                     'type': f'pypi_{vr["status"]}',
                     'severity': 'critical',

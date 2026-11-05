@@ -17,6 +17,10 @@ TESTS = [
     'test_cross_file_taint.py',
     'test_escalation.py',
     'test_escalation_e2e.py',
+    'test_graph_digest.py',
+    'test_package_graph.py',
+    'test_sso_extractor.py',
+    'test_two_stage.py',
 ]
 
 

