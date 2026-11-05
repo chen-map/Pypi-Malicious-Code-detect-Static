@@ -120,6 +120,30 @@ NEW_DDG makes the LLM and the graph **cooperate under constraint**:
 | Verification | Every ID checked against the graph; every hop checked against real edges; partial paths accepted (prefix ≥ 2 hops and ≥ 50%); single-node claims require a hostile literal in code | The model cannot invent structure |
 | Adjudication | The strong model sees only *verified* paths + flagged source code | The judge reasons over facts, not fictions |
 
+### Second pillar: the graph is co-designed for the model
+
+Classic CPGs are built for symbolic analysis — data dependencies only, because
+a theorem-prover never needs to know what executed *after* what. An LLM building
+chains needs a different graph. Ours is reconstructed around that consumer,
+while staying fully program-verifiable:
+
+| Graph change | Driven by | Measured effect |
+|---|---|---|
+| **Statement-sequence edges** — same-scope adjacent statements get `next_stmt` edges | A data-dependency-only DDG leaves `install.run(self)` and `os.system(...)` as disconnected islands; the model cannot connect what the code obviously does (reverse-shell `shellapp`) | recall **75% → 58% inverted: +17%** when added |
+| **Hash-shuffled short IDs** | Sequential N1→N2→… numbering induced the model to "walk" IDs instead of edges (a 219-hop fabricated path on a benign package) | hallucinated sequential chains eliminated |
+| **Control edges kept for the model, excluded for taint** | `if not exists('x'): Popen(...)` — the branch context is exactly what makes the payload suspicious; taint analysis must ignore it, chain-building must see it | correct install-hook chains |
+| **Function map + cross-scope flows + module-scope markers** | `setup.py` top-level code runs *at install time* — timing is evidence | install-hook chains named explicitly |
+| **ISOLATED PAYLOAD NODES section + hostile-literal gate** | Hardcoded payloads have no upstream flow; models either miss them or fabricate chains. Listed explicitly; single-node evidence accepted only against deterministic hostile-literal patterns | false accusations of 1-line benign packages rejected; true miners/reverse shells detected |
+| **IOC literals table** (pools, shell IPs, encoded blobs) | attacker infrastructure scattered across truncated code | judge names infrastructure in reasoning |
+| **AST-repr repair** | Python 3.8 lacks `ast.unparse` → node "code" degenerated into unreadable `Call(func=Attribute(...))` | model sees real source |
+| **SSO capability pre-filter** | 1093-file monorepo → graph budget | 8–23% of files selected, minutes→seconds |
+
+The pattern: **the graph is the shared interface between symbolic verification
+and neural reasoning.** Every construction decision is validated by its effect
+on the model's chain-building quality — sequence edges alone recovered +17%
+recall — and every decision keeps the graph program-checkable, so the
+anti-hallucination contract holds regardless of model capability.
+
 **What this buys us, measured:**
 
 - With all symbolic hints removed (no danger labels, no biased ordering), verdicts
@@ -128,6 +152,10 @@ NEW_DDG makes the LLM and the graph **cooperate under constraint**:
   on the benign corpus, every attempted hallucinated accusation was blocked.
 - On hard cases where the old regex-driven pipeline scored **22%**, the
   LLM-constructed-chain pipeline reaches **85–92%**.
+
+These two pillars — the model proposing chains, the graph serving as both the
+model's *eyes* and the program's *proof* — are what separates this design from
+"LLM judges code" (unverifiable) and "rules match code" (unsemantic).
 
 ### A real walk-through (`shellapp-0.1.0`, reverse shell in install hook)
 
