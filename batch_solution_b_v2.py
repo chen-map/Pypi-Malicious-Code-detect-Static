@@ -150,7 +150,7 @@ def _flagged_code_signals(verdicts, subgraph_jsons, max_funcs=4, max_chars=1200)
 
 
 def _llm_escalation_corroborated(enhanced_detection_result, voting_result,
-                                 ignore_pypi_gate=False):
+                                 ignore_pypi_gate=False, block_scan=None):
     """包级 LLM 升级 MALICIOUS 的机械复核（2026-11）。
 
     弱模型实测会无视 prompt 判据（良性 fork 名被 "typosquatting high" 或
@@ -174,6 +174,10 @@ def _llm_escalation_corroborated(enhanced_detection_result, voting_result,
         return True, '增强通道 critical'
     if strong_chain:
         return True, '可疑子图自带强污点链'
+    # 2026-11 包块划分：整包逐块读出来的链已经过 verify_paths 验证，
+    # 属于结构性证据（每一跳都对应真实存在的边）。
+    if block_scan and (block_scan.get('valid_paths') or []):
+        return True, f"包块划分验证链 {len(block_scan['valid_paths'])} 条"
     if pypi_st == 'not_found' and not ignore_pypi_gate:
         return True, 'PyPI not_found'
     return False, (f'无结构性证据(ed={ed_lvl}, pypi={pypi_st or "n/a"}, '
@@ -212,7 +216,8 @@ class BatchAnalyzerV20Voting:
     """批量分析器 V20 - 投票架构"""
 
     def __init__(self, tarfile_dir: str, llm: str = 'glm', api_key: str = '', count: int = 100, extract_base: str = 'output/packages', skip_rule_scoring: bool = False, parallel_workers: int = 1, seed: int = 42, verify_pypi: bool = False, use_llm_cache: bool = True, sandbox: bool = False,
-                llm_model: str = 'glm-4-flashx', ignore_pypi_gate: bool = False):
+                llm_model: str = 'glm-4-flashx', ignore_pypi_gate: bool = False,
+                block_scan: bool = True):
         self.tarfile_dir = Path(tarfile_dir)
         self.llm = llm
         self.api_key = api_key
@@ -228,6 +233,10 @@ class BatchAnalyzerV20Voting:
         self.use_llm_cache = use_llm_cache  # LLM 判决缓存（--no-llm-cache 关闭）
         self.sandbox = sandbox  # 沙箱行为探针(执行 setup.py,仅隔离环境启用!)
         self.llm_model = llm_model  # LLM 模型名(--llm-model)
+        # 2026-11 包块划分：机械投票落在歧义区时，整包图按文件→函数分块
+        # 逐块读（不看是否被正则标记），作为第二意见。--no-block-scan 关闭。
+        self.block_scan = block_scan
+        self._full_graph = None   # 当前包的整图快照（_run_ddg_builder 填充）
         self.results = []
         self.results_jsonl = None  # 增量落盘文件（analyze_all 时初始化）
 
@@ -254,6 +263,7 @@ class BatchAnalyzerV20Voting:
             'use_llm_cache': self.use_llm_cache,
             'sandbox': self.sandbox,
             'llm_model': self.llm_model,
+            'block_scan': self.block_scan,
         }
 
     def analyze_all(self):
@@ -575,6 +585,20 @@ class BatchAnalyzerV20Voting:
                 simplified_verdict['key_info'] = verdict.get('key_info', verdict.get('reasoning', ''))[:200]
             simplified_verdicts.append(simplified_verdict)
 
+        # ===== 2026-11 包块划分（歧义区第二意见）=====
+        # 投票路径只看"被标记的函数"——召回上限 = 标记器召回率。机械投票
+        # 落在 SUSPICIOUS 时，用整包图按文件→函数分块逐块读，粗筛只用于
+        # 预算排序。只有**验证通过的链**才允许升级（反幻觉契约不变）。
+        block_scan = None
+        if (self.block_scan
+                and voting_result['final_category'] in ('SUSPICIOUS', 'UNKNOWN')):
+            block_scan = self._full_block_scan(package_name)
+            if (block_scan and block_scan.get('verdict') == 'MALICIOUS'
+                    and block_scan.get('valid_paths')):
+                voting_result['final_category'] = 'MALICIOUS'
+                voting_result['block_scan_escalated'] = True
+                print("        [包块划分] 验证链成立 → 升级 MALICIOUS")
+
         # 2026-11 包级 LLM 聚合分析：所有子图分析完后，LLM 综观全部证据
         # 做最终全局判断（替代机械投票——投票不理解"1个可疑比83个良性重要"）
         if voting_result['final_category'] in ('SUSPICIOUS',) or (
@@ -598,7 +622,8 @@ class BatchAnalyzerV20Voting:
                     if (new_cat == 'MALICIOUS' and old_cat != 'MALICIOUS'):
                         ok, why = _llm_escalation_corroborated(
                             enhanced_detection_result, voting_result,
-                            ignore_pypi_gate=self.ignore_pypi_gate)
+                            ignore_pypi_gate=self.ignore_pypi_gate,
+                            block_scan=block_scan)
                         if not ok:
                             new_cat = 'SUSPICIOUS'
                             voting_result['llm_escalation_demoted'] = True
@@ -624,7 +649,8 @@ class BatchAnalyzerV20Voting:
         if voting_result['final_category'] == 'MALICIOUS':
             _ok, _why = _llm_escalation_corroborated(
                 enhanced_detection_result, voting_result,
-                ignore_pypi_gate=self.ignore_pypi_gate)
+                ignore_pypi_gate=self.ignore_pypi_gate,
+                block_scan=block_scan)
             if not _ok:
                 print(f"        [最终保险] MALICIOUS 无结构性证据({_why}) → SUSPICIOUS")
                 voting_result['final_category'] = 'SUSPICIOUS'
@@ -652,6 +678,15 @@ class BatchAnalyzerV20Voting:
             'analysis_degraded': voting_result.get('analysis_degraded', False),
             # 重建的四阶段攻击链（证据可解释性）
             'attack_chains': attack_chains_summary,
+            # 2026-11 包块划分（歧义区第二意见）：块数/节点数/判决/验证链
+            'block_scan': ({
+                'verdict': block_scan.get('verdict'),
+                'confidence': block_scan.get('confidence'),
+                'blocks_analyzed': block_scan.get('blocks_analyzed'),
+                'nodes_total': block_scan.get('nodes_total'),
+                'valid_paths': len(block_scan.get('valid_paths') or []),
+                'reasoning': (block_scan.get('reasoning') or '')[:200],
+            } if block_scan else None),
             # 增强检测结果（总是包含）
             'enhanced_detection': {
                 'threat_level': enhanced_detection_result['overall_threat_level'],
@@ -665,6 +700,43 @@ class BatchAnalyzerV20Voting:
         }
 
         return final_result
+
+    def _full_block_scan(self, package_name: str):
+        """包块划分：整包图按文件→函数分块，逐块读图找链（2026-11）。
+
+        与投票路径的区别：
+        - 投票路径只看"被标记的函数"（含危险节点的组），召回上限就是
+          标记器的召回率
+        - 这里每一块都读，粗筛（外部交互密度）只用于**预算排序**
+        - 判决要求 verify_paths 通过的真实链，幻觉路径不升级
+
+        只在机械投票落在 SUSPICIOUS/UNKNOWN 时调用——成本只落在歧义区。
+
+        Returns:
+            analyze_package_graph 的结果 dict，失败返回 None
+        """
+        if not self.block_scan or not self.api_key or self.api_key == 'dummy':
+            return None
+        g = self._full_graph
+        if not g or not g.get('nodes'):
+            return None
+
+        try:
+            from src.package_graph_analysis import analyze_package_graph
+            from zhipuai import ZhipuAI
+
+            client = ZhipuAI(api_key=self.api_key)
+            r = analyze_package_graph(
+                g['nodes'], g['edges'], client, self.llm_model,
+                samples=1, block_nodes=400, max_blocks=10)
+        except Exception as e:
+            print(f"        [WARN] 包块划分失败: {e}")
+            return None
+
+        print(f"        [包块划分] {r.get('blocks_analyzed', 0)} 块 / "
+              f"{r.get('nodes_total', 0)} 节点 → {r.get('verdict')} "
+              f"(验证路径 {len(r.get('valid_paths') or [])} 条)")
+        return r
 
     def _package_level_analysis(self, package_name, voting_result,
                                 ddg_v7_report, enhanced_detection_result,
@@ -707,6 +779,16 @@ class BatchAnalyzerV20Voting:
                            f"(completeness={comp if comp is not None else '?'} — "
                            f"below 0.5 means incomplete, NOT conclusive)")
             signals.append(f"  Summary: {attack_chains_summary.get('summary', '')[:200]}")
+
+        # 2026-11 跨工件：.pth / .sh / data_files 不在代码图上（DDG 只解析 .py），
+        # 但它们才是安装期持久化的落点。单独渲染一段给包级判断。
+        try:
+            from src.artifact_scanner import render_for_prompt
+            _art_text = render_for_prompt(ed.get('artifact_analysis') or {})
+            if _art_text:
+                signals.append(_art_text)
+        except Exception:
+            pass
 
         # 子图判决汇总
         vs = voting_result.get('subgraph_verdicts', [])
@@ -1677,6 +1759,9 @@ Output JSON:
                     'type': n.type or '',
                     'line': n.line,
                     'file': n.file,
+                    # 2026-11 包块划分:函数归属用于 _split_blocks 的文件→函数切分
+                    'function_name': getattr(n, 'function_name', None),
+                    'class_name': getattr(n, 'class_name', None),
                 }
                 for n in (result.get('nodes') or {}).values()
             ]
@@ -1690,6 +1775,8 @@ Output JSON:
                 }
                 for e in (result.get('edges') or [])
             ]
+            # 整图快照留给包块划分（只在歧义区用；子进程一包一进程，内存可控）
+            self._full_graph = {'nodes': ac_nodes, 'edges': ac_edges}
             chain_result = AttackChainRebuilder().rebuild(ac_nodes, ac_edges)
 
             # 2026-10 分层 CPG-lite ②:函数摘要落盘
@@ -2653,6 +2740,9 @@ def main():
                         help='消融开关:registry 身份(404/未发布版本)不作为判决证据。'
                              '用于评估纯代码分析(图内核+LLM)不依赖联网时的检出能力。'
                              '仍会做核验并记录结果,只是不参与判决')
+    parser.add_argument('--no-block-scan', action='store_true',
+                        help='关闭包块划分（默认开启：投票落在 SUSPICIOUS 时'
+                             '整包图按文件→函数分块逐块读，作为第二意见）')
 
     args = parser.parse_args()
 
@@ -2669,7 +2759,8 @@ def main():
         use_llm_cache=not args.no_llm_cache,
         sandbox=args.sandbox,
         llm_model=args.llm_model,
-        ignore_pypi_gate=args.no_pypi_gate
+        ignore_pypi_gate=args.no_pypi_gate,
+        block_scan=not args.no_block_scan,
     )
 
     analyzer.analyze_all()

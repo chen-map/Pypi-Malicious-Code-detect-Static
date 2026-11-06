@@ -21,6 +21,7 @@ TESTS = [
     'test_package_graph.py',
     'test_sso_extractor.py',
     'test_two_stage.py',
+    'test_artifact_scanner.py',
 ]
 
 
