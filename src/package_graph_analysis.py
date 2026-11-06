@@ -29,11 +29,16 @@ MAX_BLOCKS = 12
 
 def _split_blocks(nodes: List[Dict], edges: List[Dict],
                   block_nodes: int = BLOCK_NODES,
-                  max_blocks: int = MAX_BLOCKS) -> List[Tuple[str, List[Dict], List[Dict]]]:
+                  max_blocks: int = MAX_BLOCKS
+                  ) -> List[Tuple[str, List[Dict], List[Dict], Dict]]:
     """把整包图切成若干块，每块可独立交给 LLM。
 
     切分顺序：文件 → 函数 → 贪心填充。
-    返回 [(label, nodes, edges)]，边只保留两端在本块内的。
+    返回 [(label, nodes, edges, boundary_edges)]：
+      - edges 只保留两端在本块内的
+      - boundary_edges 是**跨块边**（{'in': [...], 'out': [...]}），
+        不把外部节点拉进块，只告诉 LLM 数据从哪进来、去哪了。
+        （2026-11：诱导子图会切断跨函数/跨文件流，这里补旁路元数据）
     """
     # 1) 按文件分组
     by_file: Dict[str, List[Dict]] = {}
@@ -77,13 +82,57 @@ def _split_blocks(nodes: List[Dict], edges: List[Dict],
         raw_blocks.sort(key=lambda b: _external_density(b[1]), reverse=True)
         raw_blocks = raw_blocks[:max_blocks]
 
-    # 5) 每块挑出内部边
+    # 5) 每块挑出内部边 + 跨块边（跨块边单独作为旁路元数据）
+    _BOUNDARY_KINDS = {'data', 'param', 'return', 'call'}
+    _KIND_RANK = {'return': 0, 'data': 1, 'param': 2, 'call': 3}
+    _MAX_PER_SIDE = 20
+
+    node_block: Dict[str, int] = {}
+    for bi, (_label, blk_nodes) in enumerate(raw_blocks):
+        for n in blk_nodes:
+            nid = n.get('node_id')
+            if nid:
+                node_block[nid] = bi
+
+    by_id = {n.get('node_id'): n for n in nodes if n.get('node_id')}
+    boundary: List[Dict[str, List[Dict]]] = [
+        {'in': [], 'out': []} for _ in raw_blocks]
+
+    for e in edges:
+        a, b = e.get('from_node'), e.get('to_node')
+        ba, bb = node_block.get(a), node_block.get(b)
+        if ba is None or bb is None or ba == bb:
+            continue
+        kind = e.get('kind') or e.get('edge_kind') or 'data'
+        if kind not in _BOUNDARY_KINDS:
+            continue
+        na, nb = by_id.get(a) or {}, by_id.get(b) or {}
+        rec = {
+            'from_node': a, 'to_node': b,
+            'from_file': na.get('file', ''), 'from_line': na.get('line', 0),
+            'to_file': nb.get('file', ''), 'to_line': nb.get('line', 0),
+            'from_func': na.get('function_name') or '<module>',
+            'to_func': nb.get('function_name') or '<module>',
+            'kind': kind, 'variable': e.get('variable') or '',
+        }
+        boundary[ba]['out'].append(rec)
+        boundary[bb]['in'].append(rec)
+
+    def _key(rec):
+        return (0 if rec['from_file'] != rec['to_file'] else 1,
+                _KIND_RANK.get(rec['kind'], 9),
+                rec['from_node'], rec['to_node'])
+
     out = []
-    for label, blk_nodes in raw_blocks:
+    for (label, blk_nodes), bd in zip(raw_blocks, boundary):
         ids = {n.get('node_id') for n in blk_nodes if n.get('node_id')}
         blk_edges = [e for e in edges
                      if e.get('from_node') in ids and e.get('to_node') in ids]
-        out.append((label, blk_nodes, blk_edges))
+        bounded = {
+            'in': sorted(bd['in'], key=_key)[:_MAX_PER_SIDE],
+            'out': sorted(bd['out'], key=_key)[:_MAX_PER_SIDE],
+        }
+        out.append((label, blk_nodes, blk_edges, bounded))
     return out
 
 
@@ -117,8 +166,9 @@ def analyze_package_graph(nodes: List[Dict], edges: List[Dict], client, model: s
     all_paths = []
     mal_blocks, sus_blocks = [], []
 
-    for label, b_nodes, b_edges in blocks:
-        r = analyze_block(b_nodes, b_edges, client, model, samples=samples)
+    for label, b_nodes, b_edges, b_boundary in blocks:
+        r = analyze_block(b_nodes, b_edges, client, model, samples=samples,
+                          boundary_edges=b_boundary)
         r['block'] = label
         r['block_nodes'] = len(b_nodes)
         block_results.append(r)

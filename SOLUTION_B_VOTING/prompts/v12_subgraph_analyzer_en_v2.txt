@@ -94,6 +94,9 @@ do NOT claim a complete attack chain.
 ### Function Context (complete function under analysis)
 {function_context}
 
+### Cross-Function Context (data crossing this function's boundary)
+{cross_function_context}
+
 ### Rule-Based Pre-Screen (weighted heuristics, 5 dimensions; independent signal)
 {rule_based_prescreen}
 

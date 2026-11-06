@@ -319,6 +319,14 @@ class V12SubgraphClassifier:
             prompt = prompt.replace("{function_context}",
                                     "Module-level code (no enclosing function)")
 
+        # 2026-11 划分越界修复：跨块边。函数级划分用诱导子图切块，
+        # 跨函数/跨文件边不在本块内；这里显式告诉 LLM 数据从哪进来、
+        # 返回值去了哪，避免它把"参数来源未知"当成孤立的危险调用。
+        boundary_edges = subgraph_json.get('boundary_edges') or {}
+        prompt = prompt.replace(
+            "{cross_function_context}",
+            self._format_boundary_edges(boundary_edges))
+
         # 填充字符串字面量
         real_source_data = subgraph_json.get('real_source_data', {})
         string_literals = real_source_data.get('string_literals', {})
@@ -467,6 +475,42 @@ class V12SubgraphClassifier:
                 lines.append(f"    ... ({len(path)-5} more nodes)")
 
         return "\n".join(lines) if lines else "None"
+
+    def _format_boundary_edges(self, boundary: Dict, max_per_side: int = 6) -> str:
+        """格式化跨块边（2026-11 划分越界修复）
+
+        函数级划分只保留块内边，跨函数/跨文件的数据流不在本块内。这里
+        列出**进入**和**离开**本函数的数据，让 LLM 知道危险调用的参数
+        来源与去向，而不是把它当成孤立节点。
+
+        boundary 结构: {'in': [rec...], 'out': [rec...]}
+        rec: {from_file, from_line, from_func, to_file, to_line, to_func,
+              kind, variable}
+        """
+        if not boundary:
+            return "(none - no data crosses this function's boundary)"
+
+        def _loc(rec, side):
+            if side == 'in':
+                return (f"{rec.get('from_func', '?')} "
+                        f"[{rec.get('from_file', '?')}:{rec.get('from_line', 0)}]")
+            return (f"{rec.get('to_func', '?')} "
+                    f"[{rec.get('to_file', '?')}:{rec.get('to_line', 0)}]")
+
+        def _var(rec):
+            v = rec.get('variable') or ''
+            return f"  [{v}]" if v else ''
+
+        lines = []
+        for rec in (boundary.get('in') or [])[:max_per_side]:
+            lines.append(f"IN   {_loc(rec, 'in')}  --{rec.get('kind', 'data')}"
+                         f"{_var(rec)}-->  [THIS FUNCTION]")
+        for rec in (boundary.get('out') or [])[:max_per_side]:
+            lines.append(f"OUT  [THIS FUNCTION]  --{rec.get('kind', 'data')}"
+                         f"{_var(rec)}-->  {_loc(rec, 'out')}")
+        if not lines:
+            return "(none - no data crosses this function's boundary)"
+        return "\n".join(lines)
 
     def _format_functions(self, functions: Dict) -> str:
         """格式化函数信息
