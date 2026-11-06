@@ -74,6 +74,16 @@ _PTH_DANGER = (
     'shutil', 'os.remove', 'os.chmod',
 )
 
+# 测试/文档目录：security 类包常有"故意恶意的测试夹具"，
+# 这些不会被安装执行。命中后降级为 medium（保留可见性，不让它短路判死）。
+_FIXTURE_DIRS = {'test', 'tests', 'testing', 'fixtures', 'examples',
+                 'docs', 'doc', '.github', 'benchmarks'}
+
+
+def _in_fixture_dir(rel: str) -> bool:
+    parts = {p.lower() for p in (rel or '').replace(chr(92), '/').split('/')}
+    return bool(parts & _FIXTURE_DIRS)
+
 # shell 脚本里的确定性恶意形态
 _SHELL_PATTERNS = (
     (re.compile(r'curl[^\n|;]*\|\s*(ba)?sh', re.I), 'curl_pipe_shell', 'critical'),
@@ -276,19 +286,24 @@ def risk_findings(art: Dict) -> List[Dict]:
     """
     findings: List[Dict] = []
     for d in (art.get('pth_dangerous') or []):
+        fixture = _in_fixture_dir(d['file'])
         findings.append({
             'type': 'pth_execution',
             'category': 'install_time_persistence',
-            'severity': 'critical',
+            'severity': 'medium' if fixture else 'critical',
             'file': d['file'],
             'reason': (f".pth 第 {d['line']} 行会在解释器启动时执行，"
-                       f"且包含危险能力: {', '.join(d['hits'][:3])}"),
+                       f"且包含危险能力: {', '.join(d['hits'][:3])}"
+                       + ("（位于测试/示例目录，通常不会安装执行，"
+                          "故降级为 medium）" if fixture else "")),
         })
     for s in (art.get('shell_findings') or []):
         sev = 'high'
         names = [p['pattern'] for p in s['patterns']]
         if any(p['severity'] == 'critical' for p in s['patterns']):
             sev = 'critical'
+        if _in_fixture_dir(s['file']) and sev == 'critical':
+            sev = 'medium'
         findings.append({
             'type': 'artifact_shell',
             'category': 'shell_payload',
