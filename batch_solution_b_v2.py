@@ -1719,7 +1719,11 @@ Output JSON:
                 global_chains = taint_analyze(ac_nodes, ac_edges)
                 taint_dump = {
                     'chain_count': len(global_chains),
-                    'chains': global_chains[:10],
+                    # 2026-11 划分越界修复：落盘量 10 → 40。下游
+                    # _read_subgraph_jsons 会按块内节点集合过滤后才进 prompt，
+                    # 在这里截太狠会让跨函数链分不到它该出现的块。
+                    'chains': global_chains[:40],
+                    'all_chain_count': len(global_chains),
                     'cross_file_chains': sum(1 for c in global_chains if c.get('cross_file')),
                 }
                 with open(output_dir / 'taint_chains.json', 'w', encoding='utf-8') as f:
@@ -1844,6 +1848,20 @@ Output JSON:
             except Exception:
                 _summaries_by_name = {}
 
+        # ===== 2026-11 划分越界修复：全图污点链 =====
+        # 函数级划分用诱导子图切块，跨函数/跨文件边在落盘时被丢掉，
+        # 子图级 taint_analyze 只能重建函数内部的链。全图链其实已经在
+        # _run_ddg_builder 里算好落盘（taint_chains.json），此前从没被读过。
+        # 这里按块内节点集合分发给各子图，让跨函数链进得了 prompt。
+        _global_chains = []
+        _global_file = Path(package_dir) / '.ddg_output' / 'taint_chains.json'
+        if _global_file.exists():
+            try:
+                _gdata = json.loads(_global_file.read_text(encoding='utf-8'))
+                _global_chains = _gdata.get('chains') or []
+            except Exception:
+                _global_chains = []
+
         # 读取每个子图的edges.json和nodes.json
         for subgraph_dir in sorted(subgraphs_dir.iterdir()):
             if subgraph_dir.is_dir():
@@ -1855,6 +1873,16 @@ Output JSON:
                         edges_data = json.load(f)
                     with open(nodes_json, 'r', encoding='utf-8') as f:
                         nodes_data = json.load(f)
+
+                    # 2026-11 跨块边（可选；旧 .ddg_output 没有这个文件）
+                    boundary_edges = {}
+                    _be_file = subgraph_dir / 'boundary_edges.json'
+                    if _be_file.exists():
+                        try:
+                            boundary_edges = json.loads(
+                                _be_file.read_text(encoding='utf-8'))
+                        except Exception:
+                            boundary_edges = {}
 
                     # Bug #12修复：提取dangerous_nodes，让规则分类器能正常工作
                     dangerous_nodes = [
@@ -1911,6 +1939,24 @@ Output JSON:
                         except Exception as taint_err:
                             print(f"        [WARN] 污点追踪失败({subgraph_dir.name}): {taint_err}")
 
+                    # 2026-11 全图链分发：块内链只覆盖函数内部，跨函数/跨文件
+                    # 的链必须从全图结果里按节点交集取回。跨块链优先（排前面），
+                    # 去重后每块最多 8 条。
+                    if _global_chains:
+                        try:
+                            from src.taint_engine import (
+                                distribute_chains, merge_chains)
+                            _block_ids = {n.get('node_id') for n in nodes_data
+                                          if n.get('node_id')}
+                            _global_matched = distribute_chains(
+                                _global_chains, _block_ids)
+                            if _global_matched:
+                                taint_chains = merge_chains(
+                                    _global_matched, taint_chains, max_chains=8)
+                        except Exception as dist_err:
+                            print(f"        [WARN] 全图链分发失败"
+                                  f"({subgraph_dir.name}): {dist_err}")
+
                     # 2026-11 函数级分割:从子图的 function 节点取函数名
                     func_name = None
                     for node in nodes_data:
@@ -1932,6 +1978,9 @@ Output JSON:
                         'taint_chains': taint_chains,
                         'function_name': func_name,
                         'function_summary': func_summary,
+                        # 2026-11 跨块边：不把外部节点拉进块，只告知
+                        # "本函数的参数从哪来、返回值去了哪"
+                        'boundary_edges': boundary_edges,
                     }
                     subgraph_jsons.append(subgraph_data)
 

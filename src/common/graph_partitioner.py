@@ -25,6 +25,25 @@ import networkx as nx
 from .pattern_matcher import DangerPatternLoader, SuspiciousNodeDetector
 
 
+# ==================== 跨块边（2026-11）====================
+# 函数级划分用诱导子图切块，跨函数/跨文件边会被丢弃。这里把跨块边
+# 作为**旁路元数据**随子图落盘：既不把外部节点拉进块，又让下游 LLM
+# 知道"这个函数的参数从哪来、返回值去了哪"。
+_BOUNDARY_EDGE_KINDS = {'data', 'param', 'return', 'call'}
+_KIND_RANK = {'return': 0, 'data': 1, 'param': 2, 'call': 3}
+_MAX_BOUNDARY_EDGES = 20
+
+
+def _boundary_sort_key(rec: Dict) -> Tuple:
+    """跨块边排序：跨文件优先，其次 return/data/param/call"""
+    return (
+        0 if rec.get('from_file') != rec.get('to_file') else 1,
+        _KIND_RANK.get(rec.get('kind'), 9),
+        rec.get('from_node', ''),
+        rec.get('to_node', ''),
+    )
+
+
 # ==================== 配置类 ====================
 
 @dataclass
@@ -1065,6 +1084,24 @@ class GraphPartitioner:
         else:
             raise ValueError(f"Unknown method: {method}")
 
+    def _boundary_record(self, a: str, b: str, eattrs: Dict,
+                         kind: str) -> Dict:
+        """构造一条跨块边记录（只带可读元数据，不含代码）"""
+        na = self.graph.nodes[a]
+        nb = self.graph.nodes[b]
+        return {
+            'from_node': a,
+            'to_node': b,
+            'from_file': na.get('file') or na.get('_file') or '',
+            'from_line': na.get('line') or na.get('_line') or 0,
+            'to_file': nb.get('file') or nb.get('_file') or '',
+            'to_line': nb.get('line') or nb.get('_line') or 0,
+            'from_func': na.get('function_name') or '<module>',
+            'to_func': nb.get('function_name') or '<module>',
+            'kind': kind,
+            'variable': eattrs.get('variable') or '',
+        }
+
     def partition_by_function(self) -> List[Dict]:
         """函数级分割(2026-11):按 AST 归属属性分组,替代 WCC+BFS
 
@@ -1093,6 +1130,41 @@ class GraphPartitioner:
             else:
                 module_nodes.append(node_id)
 
+        # ===== 跨块边（2026-11 划分越界修复）=====
+        # 诱导子图只保留块内边，DDG 建图阶段 resolve_cross_file /
+        # CrossFileCallTracker 得到的跨函数、跨文件边在此被丢掉，下游
+        # taint_engine 只能在函数内部重建链。这里把跨块边单独收集成
+        # **旁路元数据**（不把外部节点拉进块），随子图落盘供 prompt 呈现。
+        #
+        # 只收数据类边：函数之间不存在语句顺序（control）关系。
+        _MODULE_KEY = ('', '<module>')
+        owner: Dict[str, Tuple[str, str]] = {}
+        for gk, node_list in groups.items():
+            for nid in node_list:
+                owner[nid] = gk
+        for nid in module_nodes:
+            owner[nid] = _MODULE_KEY
+
+        boundary: Dict[Tuple[str, str], Dict[str, List[Dict]]] = defaultdict(
+            lambda: {'in': [], 'out': []})
+        for a, b, eattrs in self.graph.edges(data=True):
+            oa, ob = owner.get(a), owner.get(b)
+            if oa is None or ob is None or oa == ob:
+                continue
+            kind = eattrs.get('edge_kind') or 'data'
+            if kind not in _BOUNDARY_EDGE_KINDS:
+                continue
+            rec = self._boundary_record(a, b, eattrs, kind)
+            boundary[oa]['out'].append(rec)
+            boundary[ob]['in'].append(rec)
+
+        # 排序 + 截断：跨文件优先，其次 return/data/param/call
+        for gk in boundary:
+            for side in ('in', 'out'):
+                boundary[gk][side] = sorted(
+                    boundary[gk][side], key=_boundary_sort_key
+                )[:_MAX_BOUNDARY_EDGES]
+
         # 只保留含危险节点的组
         dangerous_set = set(self.suspicious_nodes.keys())
         results = []
@@ -1117,6 +1189,8 @@ class GraphPartitioner:
                 'file': ffile,
                 'size': len(node_list),
                 'type': 'function',
+                'boundary_edges': boundary.get(
+                    (ffile, fname), {'in': [], 'out': []}),
             })
 
         # 模块级组
@@ -1137,6 +1211,8 @@ class GraphPartitioner:
                 'file': '',
                 'size': len(module_nodes),
                 'type': 'module',
+                'boundary_edges': boundary.get(
+                    _MODULE_KEY, {'in': [], 'out': []}),
             })
 
         # 排序: severity 优先, 大小次之
@@ -1193,6 +1269,12 @@ class GraphPartitioner:
                 # 保存edges.json
                 edges_file = self._save_edges(result, sub_dir)
                 saved_files.append(edges_file)
+
+                # 保存跨块边（2026-11：划分只切 prompt，不切分析）
+                be = result.get('boundary_edges') or {}
+                if be.get('in') or be.get('out'):
+                    boundary_file = self._save_boundary_edges(result, sub_dir)
+                    saved_files.append(boundary_file)
 
             # 保存DOT
             if self.config.save_dot:
@@ -1274,6 +1356,24 @@ class GraphPartitioner:
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(edges_list, f, indent=2, ensure_ascii=False)
 
+        return output_file
+
+    def _save_boundary_edges(self, result: Dict, output_dir: Path) -> Path:
+        """保存跨块边（boundary_edges.json）
+
+        这些边**不在** subgraph 里（端点分属不同块），单独落盘供下游
+        组装 prompt：LLM 由此知道本函数的参数从哪来、返回值去了哪。
+        """
+        be = result.get('boundary_edges') or {}
+        payload = {
+            'function_name': result.get('function_name', ''),
+            'file': result.get('file', ''),
+            'in': be.get('in') or [],
+            'out': be.get('out') or [],
+        }
+        output_file = output_dir / 'boundary_edges.json'
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
         return output_file
 
     def _save_dot(self, result: Dict, output_dir: Path) -> Path:
