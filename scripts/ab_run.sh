@@ -17,7 +17,8 @@ BEN=${3:?benign corpus dir}
 OUT=${4:-${OUT:-/disk2/wch/ab100}}
 NW=${NW:-4}
 BASE_FLAGS=${BASE_FLAGS:-}
-CFGS=${CFGS:-"A B C"}          # 例: CFGS="C" 只跑全开，先拿信号
+CFGS=${CFGS:-"A B C"}   # 例: CFGS="C" 只跑全开，先拿信号
+PY=${PY:-python3}
 
 if [ -z "${API_KEY:-}" ]; then
   echo "ERROR: export API_KEY first" >&2
@@ -38,7 +39,7 @@ run_one () {           # $1=cfg  $2=corpus  $3=tag  rest=extra flags
   echo ""
   echo "########## [$cfg/$tag] $(basename "$corpus") ##########"
   rm -rf "$base"
-  python batch_solution_b_v2.py \
+  "$PY" batch_solution_b_v2.py \
       --api-key "$API_KEY" \
       --count 100 \
       --extract-base "$base" \
@@ -70,7 +71,7 @@ echo "================ SUMMARY ================"
 for cfg in $CFGS; do
   for tag in mal ben; do
     f="$OUT/results_${cfg}_${tag}.json"
-    [ -f "$f" ] && python scripts/ab_summary.py "$f" \
+    [ -f "$f" ] && "$PY" scripts/ab_summary.py "$f" \
         --label "config $cfg / $tag" --kind "$tag"
   done
 done
