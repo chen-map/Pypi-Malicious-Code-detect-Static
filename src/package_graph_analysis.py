@@ -138,7 +138,8 @@ def _split_blocks(nodes: List[Dict], edges: List[Dict],
 
 def analyze_package_graph(nodes: List[Dict], edges: List[Dict], client, model: str,
                           samples: int = 1, block_nodes: int = BLOCK_NODES,
-                          max_blocks: int = MAX_BLOCKS) -> Dict:
+                          max_blocks: int = MAX_BLOCKS,
+                          time_budget_s: float = 0) -> Dict:
     """整包图细判：分块读图 → 汇总判决。
 
     聚合规则（保守但可解释）：
@@ -158,7 +159,8 @@ def analyze_package_graph(nodes: List[Dict], edges: List[Dict], client, model: s
     if not nodes:
         return {'verdict': 'UNKNOWN', 'confidence': 0.0, 'reasoning': 'empty graph',
                 'block_results': [], 'valid_paths': [],
-                'blocks_analyzed': 0, 'nodes_total': 0}
+                'blocks_analyzed': 0, 'nodes_total': 0,
+                'truncated_by_budget': False}
 
     blocks = _split_blocks(nodes, edges, block_nodes=block_nodes,
                            max_blocks=max_blocks)
@@ -166,7 +168,19 @@ def analyze_package_graph(nodes: List[Dict], edges: List[Dict], client, model: s
     all_paths = []
     mal_blocks, sus_blocks = [], []
 
+    # 2026-11 时间预算：块数是预算，但大包的**单块**可能几千节点，
+    # 光限块数挡不住（实测一个 9317 节点良性包，10 块读了 40 分钟）。
+    # 超预算就停在当前块，用已读结果聚合。
+    import time as _time
+    _t0 = _time.time()
+    _budget_hit = False
+
     for label, b_nodes, b_edges, b_boundary in blocks:
+        if time_budget_s and (_time.time() - _t0) > time_budget_s:
+            _budget_hit = True
+            print(f"        [包块划分] 超出时间预算 {time_budget_s:.0f}s，"
+                  f"停在 {len(block_results)}/{len(blocks)} 块")
+            break
         r = analyze_block(b_nodes, b_edges, client, model, samples=samples,
                           boundary_edges=b_boundary)
         r['block'] = label
@@ -205,5 +219,6 @@ def analyze_package_graph(nodes: List[Dict], edges: List[Dict], client, model: s
         'block_results': block_results,
         'valid_paths': all_paths,
         'blocks_analyzed': len(block_results),
+        'truncated_by_budget': _budget_hit,
         'nodes_total': len(nodes),
     }

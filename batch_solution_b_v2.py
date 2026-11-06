@@ -730,9 +730,14 @@ class BatchAnalyzerV20Voting:
             from zhipuai import ZhipuAI
 
             client = ZhipuAI(api_key=self.api_key)
+            # 2026-11 时间预算（实测驱动）：一个 9317 节点的良性包按
+            # 10 块 × 400 节点读，单包耗时 40 分钟——只限块数挡不住
+            # "块本身很大"的情况。块收到 250、块数 6、总时长 240s，
+            # 超预算就用已读块聚合。
             r = analyze_package_graph(
                 g['nodes'], g['edges'], client, self.llm_model,
-                samples=1, block_nodes=400, max_blocks=10)
+                samples=1, block_nodes=250, max_blocks=6,
+                time_budget_s=240)
         except Exception as e:
             print(f"        [WARN] 包块划分失败: {e}")
             return None
