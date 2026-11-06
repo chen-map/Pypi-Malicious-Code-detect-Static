@@ -17,6 +17,7 @@ BEN=${3:?benign corpus dir}
 OUT=${4:-${OUT:-/disk2/wch/ab100}}
 NW=${NW:-4}
 BASE_FLAGS=${BASE_FLAGS:-}
+CFGS=${CFGS:-"A B C"}          # 例: CFGS="C" 只跑全开，先拿信号
 
 if [ -z "${API_KEY:-}" ]; then
   echo "ERROR: export API_KEY first" >&2
@@ -30,6 +31,10 @@ run_one () {           # $1=cfg  $2=corpus  $3=tag  rest=extra flags
   local cfg=$1 corpus=$2 tag=$3; shift 3
   local extra=("$@")
   local base="$OUT/pkgs_${cfg}_${tag}"
+  if [ -f "$OUT/results_${cfg}_${tag}.json" ]; then
+    echo "[skip] $cfg/$tag 已有结果（删除 $OUT/results_${cfg}_${tag}.json 可重跑）"
+    return 0
+  fi
   echo ""
   echo "########## [$cfg/$tag] $(basename "$corpus") ##########"
   rm -rf "$base"
@@ -50,7 +55,7 @@ run_one () {           # $1=cfg  $2=corpus  $3=tag  rest=extra flags
   fi
 }
 
-for cfg in A B C; do
+for cfg in $CFGS; do
   case $cfg in
     A) EXTRA=(--no-cross-scope --no-block-scan);;
     B) EXTRA=(--no-block-scan);;
@@ -62,7 +67,7 @@ done
 
 echo ""
 echo "================ SUMMARY ================"
-for cfg in A B C; do
+for cfg in $CFGS; do
   for tag in mal ben; do
     f="$OUT/results_${cfg}_${tag}.json"
     [ -f "$f" ] && python scripts/ab_summary.py "$f" \
