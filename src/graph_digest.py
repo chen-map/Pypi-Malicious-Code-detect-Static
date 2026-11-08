@@ -37,6 +37,24 @@ _ALL_EDGE_KINDS = _DATA_EDGE_KINDS | _STRUCT_EDGE_KINDS
 _MAX_CODE_CHARS = 110
 
 
+def any_hostile_literal(paths: List[Dict], nodes: List[Dict]) -> bool:
+    """块划分升级门（2026-11，google_re2 误升级驱动）。
+
+    verify_paths 只保证"边存在"——正则库 re2.compile 的调用链同样是
+    真实边，但语义是编译正则不是执行载荷。升级 MALICIOUS 的验证链
+    必须至少含一个敌意字面量节点（矿池/反弹 shell/编码命令…）。
+    """
+    by_id = {n.get('node_id'): (n.get('code') or '')
+             for n in nodes if n.get('node_id')}
+    for p in paths or []:
+        for nid in p.get('nodes') or []:
+            code = (by_id.get(nid) or '').lower()
+            if any(t in code for t in _LITERAL_RISK):
+                return True
+    return False
+
+
+
 def _looks_like_ast_dump(code: str) -> bool:
     """判断节点代码是否是 ast.dump() 的输出而非源码。
 

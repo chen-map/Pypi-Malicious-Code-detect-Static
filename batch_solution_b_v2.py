@@ -188,9 +188,12 @@ def _llm_escalation_corroborated(enhanced_detection_result, voting_result,
     if strong_chain:
         return True, '可疑子图自带强污点链'
     # 2026-11 包块划分：整包逐块读出来的链已经过 verify_paths 验证，
+    # 且必须含敌意字面量（升级门收紧后两条件同时满足才到得了这里），
     # 属于结构性证据（每一跳都对应真实存在的边）。
-    if block_scan and (block_scan.get('valid_paths') or []):
-        return True, f"包块划分验证链 {len(block_scan['valid_paths'])} 条"
+    if (block_scan and (block_scan.get('valid_paths') or [])
+            and block_scan.get('_hostile_literal')):
+        return True, (f"包块划分验证链 {len(block_scan['valid_paths'])} 条"
+                      f"（含敌意字面量）")
     if pypi_st == 'not_found' and not ignore_pypi_gate:
         return True, 'PyPI not_found'
     return False, (f'无结构性证据(ed={ed_lvl}, pypi={pypi_st or "n/a"}, '
@@ -622,9 +625,24 @@ class BatchAnalyzerV20Voting:
                 time_budget_s=LARGE_PKG_TIME_BUDGET_S if _is_large else 240)
             if (block_scan and block_scan.get('verdict') == 'MALICIOUS'
                     and block_scan.get('valid_paths')):
-                voting_result['final_category'] = 'MALICIOUS'
-                voting_result['block_scan_escalated'] = True
-                print("        [包块划分] 验证链成立 → 升级 MALICIOUS")
+                # 2026-11 升级收紧（google_re2 误升级驱动）：verify_paths
+                # 只保证边存在——正则库 re2.compile 的链同样是真实边。
+                # 升级要求链上至少一个敌意字面量节点；否则维持原判决，
+                # 交给包级 LLM 做语义判断。
+                from src.graph_digest import any_hostile_literal
+                _hostile = any_hostile_literal(
+                    block_scan['valid_paths'],
+                    (self._full_graph or {}).get('nodes') or [])
+                if _hostile:
+                    voting_result['final_category'] = 'MALICIOUS'
+                    voting_result['block_scan_escalated'] = True
+                    block_scan['_hostile_literal'] = True
+                    print("        [包块划分] 验证链成立 → 升级 MALICIOUS")
+                else:
+                    block_scan['escalation_blocked'] = (
+                        'no hostile literal in verified paths')
+                    print("        [包块划分] 验证链无敌意字面量 → 不升级"
+                          "（维持 " + voting_result['final_category'] + "）")
 
         # 2026-11 包级 LLM 聚合分析：所有子图分析完后，LLM 综观全部证据
         # 做最终全局判断（替代机械投票——投票不理解"1个可疑比83个良性重要"）
