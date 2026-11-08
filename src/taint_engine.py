@@ -15,7 +15,7 @@
 
 import re
 from collections import deque
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 # 数据进入点（不可信来源）
 SOURCE_PATTERNS = [
@@ -345,6 +345,63 @@ def analyze(nodes: List[Dict], edges: List[Dict]) -> List[Dict]:
         })
 
     return chains
+
+
+def distribute_chains(chains: List[Dict], node_ids: Set[str],
+                      min_hits: int = 1) -> List[Dict]:
+    """把全图污点链分发给某个函数块（2026-11 划分越界修复）。
+
+    背景：函数级划分用诱导子图切块，跨函数/跨文件边在落盘时被丢弃，
+    子图级 analyze() 只能重建函数内部的链。全图 analyze() 的结果
+    （.ddg_output/taint_chains.json）本来就有完整链，只是从没被分发回
+    各个块——本函数补上这一步。
+
+    Args:
+        chains: 全图 analyze() 的输出
+        node_ids: 本块包含的 node_id 集合
+        min_hits: 链中至少有几步落在本块内才保留（1 = 只要沾边就给）
+
+    Returns:
+        命中的链（原样返回，不改 node_id / steps）
+    """
+    if not chains or not node_ids:
+        return []
+    out = []
+    for c in chains:
+        hits = sum(1 for s in (c.get('steps') or [])
+                   if s.get('node_id') in node_ids)
+        if hits >= min_hits:
+            out.append(c)
+    return out
+
+
+def _chain_sig(c: Dict) -> tuple:
+    """链的归一化指纹：来源/汇类别 + 步骤节点序列（用于跨块链与块内链去重）"""
+    return (
+        c.get('source_category', ''),
+        c.get('sink_category', ''),
+        tuple(s.get('node_id', '') for s in (c.get('steps') or [])),
+    )
+
+
+def merge_chains(primary: List[Dict], secondary: List[Dict],
+                 max_chains: int = 8) -> List[Dict]:
+    """合并两组链并去重，优先保留 primary（通常是跨块的全图链）。
+
+    跨块链覆盖多个函数/文件，信息量高于块内链，所以排在前面，
+    且在 max_chains 截断时不会被块内链挤掉。
+    """
+    seen = set()
+    out = []
+    for c in list(primary or []) + list(secondary or []):
+        sig = _chain_sig(c)
+        if sig in seen:
+            continue
+        seen.add(sig)
+        out.append(c)
+        if len(out) >= max_chains:
+            break
+    return out
 
 
 def format_for_prompt(chains: List[Dict], max_chains: int = 4) -> str:

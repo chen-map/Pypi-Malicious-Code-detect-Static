@@ -230,7 +230,7 @@ class BatchAnalyzerV20Voting:
 
     def __init__(self, tarfile_dir: str, llm: str = 'glm', api_key: str = '', count: int = 100, extract_base: str = 'output/packages', skip_rule_scoring: bool = False, parallel_workers: int = 1, seed: int = 42, verify_pypi: bool = False, use_llm_cache: bool = True, sandbox: bool = False,
                 llm_model: str = 'glm-4-flashx', ignore_pypi_gate: bool = False,
-                block_scan: bool = True):
+                block_scan: bool = True, cross_scope: bool = True):
         self.tarfile_dir = Path(tarfile_dir)
         self.llm = llm
         self.api_key = api_key
@@ -249,6 +249,9 @@ class BatchAnalyzerV20Voting:
         # 2026-11 包块划分：机械投票落在歧义区时，整包图按文件→函数分块
         # 逐块读（不看是否被正则标记），作为第二意见。--no-block-scan 关闭。
         self.block_scan = block_scan
+        # 2026-11 消融开关（--no-cross-scope）：关闭跨块边 + 全图链分发，
+        # 用于量化"跨作用域证据"本身的增益
+        self.cross_scope = cross_scope
         self._full_graph = None   # 当前包的整图快照（_run_ddg_builder 填充）
         self.results = []
         self.results_jsonl = None  # 增量落盘文件（analyze_all 时初始化）
@@ -277,6 +280,7 @@ class BatchAnalyzerV20Voting:
             'sandbox': self.sandbox,
             'llm_model': self.llm_model,
             'block_scan': self.block_scan,
+            'cross_scope': self.cross_scope,
         }
 
     def analyze_all(self):
@@ -751,6 +755,8 @@ class BatchAnalyzerV20Voting:
             from zhipuai import ZhipuAI
 
             client = ZhipuAI(api_key=self.api_key)
+            # 2026-11 时间预算（实测驱动）：只限块数挡不住"块本身很大"。
+            # 预算由调用方给定（歧义区 250/6/240s，大包 300/16/420s）。
             r = analyze_package_graph(
                 g['nodes'], g['edges'], client, self.llm_model,
                 samples=1, block_nodes=block_nodes, max_blocks=max_blocks,
@@ -1869,7 +1875,11 @@ Output JSON:
                 global_chains = taint_analyze(ac_nodes, ac_edges)
                 taint_dump = {
                     'chain_count': len(global_chains),
-                    'chains': global_chains[:10],
+                    # 2026-11 划分越界修复：落盘量 10 → 40。下游
+                    # _read_subgraph_jsons 会按块内节点集合过滤后才进 prompt，
+                    # 在这里截太狠会让跨函数链分不到它该出现的块。
+                    'chains': global_chains[:40],
+                    'all_chain_count': len(global_chains),
                     'cross_file_chains': sum(1 for c in global_chains if c.get('cross_file')),
                 }
                 with open(output_dir / 'taint_chains.json', 'w', encoding='utf-8') as f:
@@ -1994,6 +2004,20 @@ Output JSON:
             except Exception:
                 _summaries_by_name = {}
 
+        # ===== 2026-11 划分越界修复：全图污点链 =====
+        # 函数级划分用诱导子图切块，跨函数/跨文件边在落盘时被丢掉，
+        # 子图级 taint_analyze 只能重建函数内部的链。全图链其实已经在
+        # _run_ddg_builder 里算好落盘（taint_chains.json），此前从没被读过。
+        # 这里按块内节点集合分发给各子图，让跨函数链进得了 prompt。
+        _global_chains = []
+        _global_file = Path(package_dir) / '.ddg_output' / 'taint_chains.json'
+        if self.cross_scope and _global_file.exists():
+            try:
+                _gdata = json.loads(_global_file.read_text(encoding='utf-8'))
+                _global_chains = _gdata.get('chains') or []
+            except Exception:
+                _global_chains = []
+
         # 读取每个子图的edges.json和nodes.json
         for subgraph_dir in sorted(subgraphs_dir.iterdir()):
             if subgraph_dir.is_dir():
@@ -2005,6 +2029,16 @@ Output JSON:
                         edges_data = json.load(f)
                     with open(nodes_json, 'r', encoding='utf-8') as f:
                         nodes_data = json.load(f)
+
+                    # 2026-11 跨块边（可选；旧 .ddg_output 没有这个文件）
+                    boundary_edges = {}
+                    _be_file = subgraph_dir / 'boundary_edges.json'
+                    if self.cross_scope and _be_file.exists():
+                        try:
+                            boundary_edges = json.loads(
+                                _be_file.read_text(encoding='utf-8'))
+                        except Exception:
+                            boundary_edges = {}
 
                     # Bug #12修复：提取dangerous_nodes，让规则分类器能正常工作
                     dangerous_nodes = [
@@ -2061,6 +2095,24 @@ Output JSON:
                         except Exception as taint_err:
                             print(f"        [WARN] 污点追踪失败({subgraph_dir.name}): {taint_err}")
 
+                    # 2026-11 全图链分发：块内链只覆盖函数内部，跨函数/跨文件
+                    # 的链必须从全图结果里按节点交集取回。跨块链优先（排前面），
+                    # 去重后每块最多 8 条。
+                    if _global_chains:
+                        try:
+                            from src.taint_engine import (
+                                distribute_chains, merge_chains)
+                            _block_ids = {n.get('node_id') for n in nodes_data
+                                          if n.get('node_id')}
+                            _global_matched = distribute_chains(
+                                _global_chains, _block_ids)
+                            if _global_matched:
+                                taint_chains = merge_chains(
+                                    _global_matched, taint_chains, max_chains=8)
+                        except Exception as dist_err:
+                            print(f"        [WARN] 全图链分发失败"
+                                  f"({subgraph_dir.name}): {dist_err}")
+
                     # 2026-11 函数级分割:从子图的 function 节点取函数名
                     func_name = None
                     for node in nodes_data:
@@ -2082,6 +2134,9 @@ Output JSON:
                         'taint_chains': taint_chains,
                         'function_name': func_name,
                         'function_summary': func_summary,
+                        # 2026-11 跨块边：不把外部节点拉进块，只告知
+                        # "本函数的参数从哪来、返回值去了哪"
+                        'boundary_edges': boundary_edges,
                     }
                     subgraph_jsons.append(subgraph_data)
 
@@ -2803,6 +2858,8 @@ def main():
                         help='消融开关:registry 身份(404/未发布版本)不作为判决证据。'
                              '用于评估纯代码分析(图内核+LLM)不依赖联网时的检出能力。'
                              '仍会做核验并记录结果,只是不参与判决')
+    parser.add_argument('--no-cross-scope', action='store_true',
+                        help='消融开关:关闭跨块边与全图链分发（量化跨作用域证据的增益）')
     parser.add_argument('--no-block-scan', action='store_true',
                         help='关闭包块划分（默认开启：投票落在 SUSPICIOUS 时'
                              '整包图按文件→函数分块逐块读，作为第二意见）')
@@ -2824,6 +2881,7 @@ def main():
         llm_model=args.llm_model,
         ignore_pypi_gate=args.no_pypi_gate,
         block_scan=not args.no_block_scan,
+        cross_scope=not args.no_cross_scope,
     )
 
     analyzer.analyze_all()

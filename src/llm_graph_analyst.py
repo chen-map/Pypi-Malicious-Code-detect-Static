@@ -268,7 +268,8 @@ def _auto_anchors(nodes: List[Dict], edges: List[Dict],
 def analyze(nodes: List[Dict], edges: List[Dict], client, model: str,
             max_nodes: int = 700, max_digest_chars: int = 14000,
             show_danger: bool = False, samples: int = 1,
-            priority_nodes: Set[str] = None) -> Dict:
+            priority_nodes: Set[str] = None,
+            boundary_edges: Optional[Dict] = None) -> Dict:
     """让 LLM 读图找链，并验证它给出的链是否真实存在。
 
     verdict 与路径**解耦**（2026-11 真实样本驱动）：
@@ -288,7 +289,8 @@ def analyze(nodes: List[Dict], edges: List[Dict], client, model: str,
           'error': str | None,
         }
     """
-    text, s2r = digest(nodes, edges, max_nodes=max_nodes)
+    text, s2r = digest(nodes, edges, max_nodes=max_nodes,
+                       boundary_edges=boundary_edges)
     if len(text) > max_digest_chars:
         # 超预算：按行截断（NODES 优先保留，EDGES 尽量保留）
         text = text[:max_digest_chars] + '\n## (digest truncated)'

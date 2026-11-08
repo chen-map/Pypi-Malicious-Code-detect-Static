@@ -990,6 +990,54 @@ BENIGN:   exec(open("_version.py"))  → setuptools-scm 版本检测
 MALICIOUS: 反弹 shell                → 固定 IP 反向连接
 MALICIOUS: XMRig 挖矿                → 矿池+钱包地址
 MALICIOUS: base64→exec               → 编码载荷执行
+
+---
+
+# 第十一轮:函数级划分不再切断跨函数边(2026-11)
+
+## 问题
+`partition_by_function` 用 `nx.subgraph(node_list)` 生成诱导子图,只保留
+两端都在本函数内的边;`_save_edges` 再把这份被切过的边集写进
+`sub_ddgs/*/edges.json`;`_read_subgraph_jsons` 在这份数据上跑
+`taint_analyze`。结果:DDG 建图阶段通过 `resolve_cross_file` /
+`CrossFileCallTracker` 得到的跨函数、跨文件边,在进入 LLM 之前全部丢失。
+
+同时发现**全图污点其实已经跑了**(`_run_ddg_builder` 用全图 ac_nodes/ac_edges
+调 `taint_analyze`,写 `.ddg_output/taint_chains.json`,但截断到前 10 条),
+`_read_subgraph_jsons` 却从不读它。所以这不是算法缺失,是**接线缺失 +
+划分越界**:划分同时决定了"LLM 看哪一块"和"分析算法能看到哪些边"。
+
+## 修复
+1. **`taint_engine.distribute_chains / merge_chains`**:全图链按块内节点
+   交集分发给各函数块;合并去重时跨块链优先,每块上限 8 条。
+2. **全图链落盘扩量**:`chains[:10]` → `[:40]`,加 `all_chain_count`。
+3. **`_read_subgraph_jsons`**:读 `taint_chains.json`,按块分发后与块内链
+   合并,写进 `subgraph_data['taint_chains']`。
+4. **`partition_by_function` 产出 `boundary_edges`**:两遍扫描,端点分属
+   不同组的边记入 `{'in': [...], 'out': [...]}`;只收
+   data/param/return/call(函数间不存在语句顺序关系),跨文件优先,
+   每侧截断 20 条。**不把外部节点拉进块**——纯旁路元数据。
+5. **`save_results` 落盘 `boundary_edges.json`**;旧 `.ddg_output` 缺文件时
+   优雅降级为空。
+6. **Prompt 渲染**:模板 `v12_subgraph_analyzer_en_v2.txt` 新增
+   `{cross_function_context}`,`_format_boundary_edges` 渲染
+   `IN  load_config [config.py:3] --return[payload]--> [THIS FUNCTION]`。
+   缓存 key 含 prompt 哈希,自动失效。
+7. **同构修 `package_graph_analysis._split_blocks`(Phase A 路径)**:
+   返回四元组,带 boundary_edges;`digest(..., boundary_edges=)` 新增
+   `## BOUNDARY EDGES` 段;`llm_graph_analyst.analyze` 透传。
+
+## 验证
+- `python tests/run_all.py`:15 个文件全绿(新增 `test_cross_scope.py` 34 项)
+- 离线端到端(三文件 source→transform→main):
+  - 3 个函数块,20 条跨块记录,其中 10 条跨文件
+  - `get_config --return[payload]--> decode --return[data]--> run` 可见
+  - 全图链 1 条,分发到全部 3 个块,跨文件链正确进入 subgraph_data
+  - 修复前:每个块 `boundary_edges={}`,跨文件链不可见
+
+## 未做(下一轮)
+跨工件(`pyproject.toml` / `.pth` / `.sh` / 数据文件)不在图上,需要
+Artifact 层;本轮只修"已建好的跨函数/跨文件边被划分丢掉"。
 --
 
 # 第十二轮:包块划分 + 跨工件补偿(2026-11)

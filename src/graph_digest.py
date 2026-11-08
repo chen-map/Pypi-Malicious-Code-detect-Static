@@ -203,13 +203,19 @@ def _graph_distances(nodes: List[Dict], edges: List[Dict],
 def digest(nodes: List[Dict], edges: List[Dict],
            max_nodes: int = 700, max_edges: int = 1200,
            max_chars: int = 0, show_danger: bool = False,
-           priority_nodes: Set[str] = None):
+           priority_nodes: Set[str] = None,
+           boundary_edges: Dict = None):
     """把图序列化为 LLM 可读文本，并返回短 ID 映射。
 
     2026-11 改进：节点使用**短 ID**（N1/N2/…）而非全路径 ID。
     全路径 ID（`_disk2_..._setup.py_8_4`）有两个问题：占 token、
     LLM 抄写时极易出错导致验证失败。短 ID 由本函数分配并返回映射表，
     验证时再映射回真实 node_id。
+
+    Args:
+        boundary_edges: 可选，跨块边 {'in': [rec...], 'out': [rec...]}。
+            分块分析时块内边被诱导子图切断，这里单独呈现"数据从哪进来、
+            去哪了"，让 LLM 不把跨函数链的起点当成孤立节点。
 
     Returns:
         (text, short_to_real) — short_to_real: {'N1': '<real node_id>'}
@@ -401,6 +407,32 @@ def digest(nodes: List[Dict], edges: List[Dict],
         lines.append(f'{sa[1]} ({sa[0]})  =>  {sb[1]} ({sb[0]}){var_note}  via {a}->{b}')
     if not _seen_flow:
         lines.append('(none - all data stays within a single function)')
+
+    # ===== 跨块边（2026-11 划分越界修复）=====
+    # 分块分析时块内边是诱导子图，跨函数/跨文件的边不在里面。这里单独
+    # 呈现：数据从哪个函数进来、本函数的结果又被谁消费。没有这一段，
+    # 跨函数链的起点会被模型当成"参数来源未知"，只能给 SUSPICIOUS。
+    if boundary_edges:
+        lines.append('')
+        lines.append('## BOUNDARY EDGES  '
+                     '(data crossing THIS block\'s boundary)')
+        _b_lines = 0
+        for rec in (boundary_edges.get('in') or [])[:8]:
+            var_note = f"  [{rec['variable']}]" if rec.get('variable') else ''
+            lines.append(
+                f"IN   {rec.get('from_func', '?')} "
+                f"[{rec.get('from_file', '?')}:{rec.get('from_line', 0)}]  "
+                f"--{rec.get('kind', 'data')}{var_note}-->  [THIS BLOCK]")
+            _b_lines += 1
+        for rec in (boundary_edges.get('out') or [])[:8]:
+            var_note = f"  [{rec['variable']}]" if rec.get('variable') else ''
+            lines.append(
+                f"OUT  [THIS BLOCK]  --{rec.get('kind', 'data')}{var_note}-->  "
+                f"{rec.get('to_func', '?')} "
+                f"[{rec.get('to_file', '?')}:{rec.get('to_line', 0)}]")
+            _b_lines += 1
+        if not _b_lines:
+            lines.append('(none)')
 
     # ===== 孤立载荷节点（2026-11，单节点证据驱动）=====
     # 真实形态：恶意 payload 直接写在调用里，没有"数据从哪来"的链：
