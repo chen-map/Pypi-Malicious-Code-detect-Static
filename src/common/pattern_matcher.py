@@ -334,6 +334,9 @@ class SuspiciousNodeDetector:
         for node_id, attrs in graph.nodes(data=True):
             info = self._analyze_node(node_id, attrs)
             if info and info.get('severity') in ['critical', 'high', 'medium']:
+                # 字典路径没有 file；统一从 attrs 补（benign_context 需要）
+                if info.get('file') is None:
+                    info['file'] = attrs.get('file') or attrs.get('_file') or ''
                 suspicious[node_id] = info
 
         return suspicious
@@ -361,7 +364,10 @@ class SuspiciousNodeDetector:
                 'severity': v7_match.group(1).lower(),
                 'category': v7_match.group(2),
                 'reason': v7_match.group(3),
-                'label': label
+                'label': label,
+                # 2026-11 良性上下文判定需要文件路径（tests/ 降权、
+                # 版本惯用法识别都在 benign_context.apply 里做）
+                'file': attrs.get('file') or attrs.get('_file') or '',
             }
 
         # 方法2: 检查颜色标记
@@ -371,7 +377,8 @@ class SuspiciousNodeDetector:
                 'severity': severity_by_color,
                 'category': 'flagged_node',
                 'reason': f'Flagged by color: {fillcolor}',
-                'label': label
+                'label': label,
+                'file': attrs.get('file') or attrs.get('_file') or '',
             }
 
         # 降噪守卫1: 函数定义节点不自匹配（函数体已逐语句成节点）
@@ -408,6 +415,7 @@ class SuspiciousNodeDetector:
         result = self.pattern_loader.match_dictionary(label, include_low=False)
         if result:
             result['label'] = label
+            result['file'] = None   # 由 _analyze_node 的调用方补充
             return result
 
         # 方法4: 使用自定义规则

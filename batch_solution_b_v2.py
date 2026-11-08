@@ -61,6 +61,19 @@ PER_PACKAGE_TIMEOUT = 900
 # 成本线性爆炸 → 超时。按危险节点数保留最危险的前 N 个。
 MAX_SUBGRAPHS_ANALYZED = 400
 
+# ===== 2026-11 大包拆分阈值 =====
+# 建图侧：py 文件数超过此值 → SSO 粗筛选中子集建图（agent_framework
+# 1093 文件全量建图 CPU 40 分钟是 ANALYSIS_TIMEOUT 主因）
+LARGE_PKG_FILE_THRESHOLD = 150
+# 分析侧：子图数或全图节点数超过任一阈值 → 跳过 400 子图机器，
+# 直接走块划分快路径（block_nodes=300/max_blocks=16/420s）
+LARGE_PKG_SUBGRAPH_THRESHOLD = 200
+LARGE_PKG_NODE_THRESHOLD = 6000
+# 大包块划分预算（放大幅度受 900s 包级信封约束：SSO 已砍掉大部分建图时间）
+LARGE_PKG_BLOCK_NODES = 300
+LARGE_PKG_MAX_BLOCKS = 16
+LARGE_PKG_TIME_BUDGET_S = 420
+
 
 def _analyze_one_in_subprocess(input_path, input_type, worker_kwargs, results_jsonl_str):
     """子进程 worker: 构造独立 analyzer 分析单包并落盘结果行。
@@ -585,14 +598,24 @@ class BatchAnalyzerV20Voting:
                 simplified_verdict['key_info'] = verdict.get('key_info', verdict.get('reasoning', ''))[:200]
             simplified_verdicts.append(simplified_verdict)
 
-        # ===== 2026-11 包块划分（歧义区第二意见）=====
+        # ===== 2026-11 包块划分（歧义区第二意见 / 大包主路径）=====
         # 投票路径只看"被标记的函数"——召回上限 = 标记器召回率。机械投票
         # 落在 SUSPICIOUS 时，用整包图按文件→函数分块逐块读，粗筛只用于
         # 预算排序。只有**验证通过的链**才允许升级（反幻觉契约不变）。
+        # 大包（_is_large）走块划分是**主路径**：rule-only 投票没有 LLM
+        # 语义判断，不再有"歧义区"概念，直接整包读。
+        _is_large = (len(subgraph_jsons) > LARGE_PKG_SUBGRAPH_THRESHOLD
+                     or len((self._full_graph or {}).get('nodes') or [])
+                     > LARGE_PKG_NODE_THRESHOLD)
         block_scan = None
-        if (self.block_scan
-                and voting_result['final_category'] in ('SUSPICIOUS', 'UNKNOWN')):
-            block_scan = self._full_block_scan(package_name)
+        _block_gate = (voting_result['final_category'] in ('SUSPICIOUS', 'UNKNOWN')
+                       or (_is_large and not self.skip_rule_scoring))
+        if self.block_scan and _block_gate:
+            block_scan = self._full_block_scan(
+                package_name,
+                block_nodes=LARGE_PKG_BLOCK_NODES if _is_large else 250,
+                max_blocks=LARGE_PKG_MAX_BLOCKS if _is_large else 6,
+                time_budget_s=LARGE_PKG_TIME_BUDGET_S if _is_large else 240)
             if (block_scan and block_scan.get('verdict') == 'MALICIOUS'
                     and block_scan.get('valid_paths')):
                 voting_result['final_category'] = 'MALICIOUS'
@@ -701,7 +724,8 @@ class BatchAnalyzerV20Voting:
 
         return final_result
 
-    def _full_block_scan(self, package_name: str):
+    def _full_block_scan(self, package_name: str, block_nodes: int = 250,
+                         max_blocks: int = 6, time_budget_s: float = 240):
         """包块划分：整包图按文件→函数分块，逐块读图找链（2026-11）。
 
         与投票路径的区别：
@@ -710,7 +734,8 @@ class BatchAnalyzerV20Voting:
         - 这里每一块都读，粗筛（外部交互密度）只用于**预算排序**
         - 判决要求 verify_paths 通过的真实链，幻觉路径不升级
 
-        只在机械投票落在 SUSPICIOUS/UNKNOWN 时调用——成本只落在歧义区。
+        调用时机：歧义区（SUSPICIOUS/UNKNOWN）作为第二意见；大包作为
+        **主路径**（rule-only 投票没有语义判断，预算让给块划分）。
 
         Returns:
             analyze_package_graph 的结果 dict，失败返回 None
@@ -728,7 +753,8 @@ class BatchAnalyzerV20Voting:
             client = ZhipuAI(api_key=self.api_key)
             r = analyze_package_graph(
                 g['nodes'], g['edges'], client, self.llm_model,
-                samples=1, block_nodes=400, max_blocks=10)
+                samples=1, block_nodes=block_nodes, max_blocks=max_blocks,
+                time_budget_s=time_budget_s)
         except Exception as e:
             print(f"        [WARN] 包块划分失败: {e}")
             return None
@@ -948,11 +974,21 @@ Output JSON:
         classifier = V12SubgraphClassifier(self.api_key, use_cache=self.use_llm_cache, model=self.llm_model)
 
         # ===== 改进1：子图优先级排序 =====
+        # 2026-11 大包快路径：子图数超限（ag2 1136 个）或全图节点超限时，
+        # 20 次 LLM 高优先级投票对 400 个子图是又贵又浅——直接全部
+        # rule-only，把预算交给块划分（验证链 + 单节点敌意字面量门）。
+        _is_large = (len(subgraph_jsons) > LARGE_PKG_SUBGRAPH_THRESHOLD
+                     or len((self._full_graph or {}).get('nodes') or [])
+                     > LARGE_PKG_NODE_THRESHOLD)
         print(f"\n        [改进1] 智能预处理（子图优先级排序）...")
         high_priority_subgraphs, low_priority_subgraphs = prioritizer.prioritize_subgraphs(
             subgraph_jsons,
-            max_llm_calls=20  # 限制LLM调用次数
+            max_llm_calls=0 if _is_large else 20
         )
+        if _is_large:
+            print(f"        [大包快路径] 子图 {len(subgraph_jsons)} / 节点 "
+                  f"{len((self._full_graph or {}).get('nodes') or [])} → "
+                  f"跳过高优 LLM 投票，预算交给块划分")
 
         # ===== 高优先级子图：规则评分 + LLM验证 或 直接LLM分析 =====
         if self.skip_rule_scoring:
@@ -1614,7 +1650,32 @@ Output JSON:
         package_path = Path(package_dir)
 
         print(f"          [Step 2.1] 构建DDG V7...")
-        builder = DDGBuilderV7(package_dir)
+
+        # ===== 2026-11 SSO 接线（大包建图侧治本）=====
+        # extract_sso/select_files_for_graph 此前从未被调用——1093 文件的
+        # agent_framework 全量建图 CPU 40 分钟是 ANALYSIS_TIMEOUT 主因。
+        # 大包只对 SSO 选中的子集建图（Tier-1 永不裁剪，import 闭包与
+        # 长常量补偿保证链的起点不断）；小包全量，行为不变。
+        include_files = None
+        try:
+            _py_count = len([p for p in package_path.rglob('*.py')
+                             if '__pycache__' not in str(p)
+                             and '.ddg_output' not in str(p)])
+            if _py_count > LARGE_PKG_FILE_THRESHOLD:
+                from src.sso_extractor import extract_sso, select_files_for_graph
+                _t_sso = time.time()
+                sso = extract_sso(package_path)
+                include_files = select_files_for_graph(
+                    sso, max_files=120, project_dir=package_path)
+                print(f"          [SSO 粗筛] {_py_count} 个 .py → "
+                      f"建图 {len(include_files)} 个 "
+                      f"({time.time()-_t_sso:.1f}s, "
+                      f"module级 {sum(1 for f in sso.get('module_level_capabilities') or {})})")
+        except Exception as sso_err:
+            print(f"          [WARN] SSO 粗筛失败,回退全量建图: {sso_err}")
+            include_files = None
+
+        builder = DDGBuilderV7(package_dir, include_files=include_files)
         result = builder.build()
 
         # 输出结果目录（参考main.py lines 139-204）
@@ -1706,7 +1767,9 @@ Output JSON:
                 verbose=False
             )
 
-            partitioner = GraphPartitioner(nx_graph, config)
+            # project_dir 传给良性上下文判定（版本惯用法需要读目标文件）
+            partitioner = GraphPartitioner(nx_graph, config,
+                                           project_dir=package_path)
 
             # 执行分割(2026-11: 函数级替代 WCC+BFS)
             subgraphs = partitioner.partition(method='function')

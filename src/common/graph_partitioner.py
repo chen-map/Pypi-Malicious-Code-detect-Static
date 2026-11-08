@@ -793,7 +793,8 @@ class GraphPartitioner:
     """
 
     def __init__(self, graph_or_dotfile, config: Optional[PartitionConfig] = None,
-                 patterns_file: Optional[str] = None):
+                 patterns_file: Optional[str] = None,
+                 project_dir=None):
         """
         初始化分割器
 
@@ -801,6 +802,8 @@ class GraphPartitioner:
             graph_or_dotfile: NetworkX图或DOT文件路径
             config: 分割配置
             patterns_file: 危险模式配置文件路径
+            project_dir: 包解压目录（2026-11 良性上下文判定需要读目标文件：
+                         版本惯用法 exec(open(X).read()) 必须真读 X 才能放行）
         """
         self.config = config or PartitionConfig()
 
@@ -821,6 +824,24 @@ class GraphPartitioner:
 
         # 检测危险节点
         self.suspicious_nodes = self.node_detector.detect_all(self.graph)
+
+        # 2026-11 良性上下文降权（确定性，非 LLM）：
+        # tests/ 目录 critical→medium（保留可见性）；版本检测惯用法→low。
+        # 必须在 partition 之前——severity 决定分组排序与 is_dangerous 落盘。
+        if project_dir is not None and self.suspicious_nodes:
+            try:
+                from src.benign_context import apply as apply_benign_context
+                _stats = apply_benign_context(
+                    self.suspicious_nodes, graph=self.graph,
+                    project_dir=project_dir)
+                if (_stats.get('fixture_downgraded')
+                        or _stats.get('version_idiom')):
+                    print(f"  [BenignContext] fixture降权 "
+                          f"{_stats['fixture_downgraded']}, "
+                          f"版本惯用法 {_stats['version_idiom']}")
+            except Exception as _bc_err:
+                if self.config.verbose:
+                    print(f"  [BenignContext] 判定失败(忽略): {_bc_err}")
 
         if self.config.verbose:
             print(f"  [Partitioner] Graph loaded: {self.graph.number_of_nodes()} nodes, {self.graph.number_of_edges()} edges")
