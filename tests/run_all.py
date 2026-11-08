@@ -22,6 +22,7 @@ TESTS = [
     'test_sso_extractor.py',
     'test_two_stage.py',
     'test_cross_scope.py',
+    'test_benign_context.py',
     'test_artifact_scanner.py',
 ]
 

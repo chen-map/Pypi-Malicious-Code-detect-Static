@@ -1345,6 +1345,9 @@ class GraphPartitioner:
                 # 2026-11 摘要传播:污点相关函数的调用点标记
                 'sink_expansion': attrs.get('sink_expansion', False),
                 'taint_categories': attrs.get('taint_categories', None),
+                # 2026-11 良性上下文标记（fixture_dir / version_file）：
+                # 随 nodes.json 落盘，digest/LLM 全链路可见
+                'benign_context': attrs.get('benign_context', None),
             })
 
         output_file = output_dir / 'nodes.json'

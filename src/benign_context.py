@@ -27,8 +27,12 @@
     - 宁可漏降不可误放：version idiom 必须读到目标文件且内容纯净才通过
 """
 import ast
+import re
 from pathlib import Path
 from typing import Dict, Optional, Set
+
+# exec(f.read()) / exec(x.read(), ...) 形状（路径 2 用）
+_EXEC_READ_RE = re.compile(r'\bexec\s*\(\s*\w+\s*\.\s*read\s*\(\s*\)')
 
 # 测试/文档目录（与 artifact_scanner._FIXTURE_DIRS 保持一致，跨语言通用）
 FIXTURE_DIRS: Set[str] = {
@@ -42,6 +46,16 @@ _VERSION_TARGETS = {'__version__', '__version_tuple__', 'version',
 
 # 版本文件大小上限（真版本文件都极小；上限防拿大文件绕过）
 _MAX_VERSION_FILE_BYTES = 8_192
+
+# 路径 2：版本模板文件名（versioningit/setuptools-scm 的运行时模板
+# _version.py 里 def + exec(f.read()) 是标准形态——open 和 exec 分属
+# 不同语句节点，路径 1 的 in-statement 解析不到目标）
+_VERSION_TEMPLATE_NAMES = {'_version.py', 'version.py', 'version_file.py',
+                           '_version_peer.py'}
+
+# 模板文件内不允许出现的网络/进程 API（出现即视为非惯用法）
+_TEMPLATE_FORBID = ('requests', 'urllib', 'urlopen', 'socket', 'http.client',
+                    'subprocess', 'os.system', 'popen', 'pty', 'ctypes')
 
 
 def is_fixture_path(rel_path: str) -> bool:
@@ -151,27 +165,60 @@ def _extract_read_target(node_code: str) -> Optional[str]:
     return None
 
 
-def is_version_idiom(node_code: str, project_dir) -> bool:
-    """exec(open(X).read()) 且 X 内容纯净 → 版本检测惯用法（确定性）。"""
+def is_version_idiom(node_code: str, project_dir,
+                     node_file: str = '') -> bool:
+    """版本检测惯用法（确定性，两条路径）。
+
+    路径 1：exec(open(X).read()) 且 X 在包内、内容纯净。
+    路径 2：节点位于版本模板文件（_version.py 等）内，形状是
+           exec(<handle>.read()...)，且模板文件本身无网络/进程 API。
+           （adbc_driver_sqlite 形态：open 与 exec 分属不同节点）
+    """
     if not node_code or 'exec' not in node_code and 'compile' not in node_code:
         return False
+    root = Path(project_dir) if project_dir else None
+    if root is not None and not root.exists():
+        return False
+
+    # ---- 路径 1：in-statement open 目标 ----
     target = _extract_read_target(node_code)
-    if not target:
+    if target:
+        base = target.replace(chr(92), '/').split('/')[-1]
+        if base.endswith('.py') and root is not None:
+            for h in list(root.rglob(base))[:20]:
+                if '__pycache__' in str(h) or '.ddg_output' in str(h):
+                    continue
+                if _version_file_is_pure(h):
+                    return True
         return False
-    base = target.replace(chr(92), '/').split('/')[-1]
-    if not base.endswith('.py'):
+
+    # ---- 路径 2：版本模板形状（exec(f.read()) 在 _version.py 内）----
+    if not node_file or root is None:
         return False
-    root = Path(project_dir)
-    if not root.exists():
+    fname = node_file.replace(chr(92), '/').split('/')[-1].lower()
+    if fname not in _VERSION_TEMPLATE_NAMES:
         return False
-    # 在包内定位同名文件（限制数量防巨型包扫描爆炸）
-    hits = list(root.rglob(base))[:20]
-    for h in hits:
-        if '__pycache__' in str(h) or '.ddg_output' in str(h):
-            continue
-        if _version_file_is_pure(h):
-            return True
-    return False
+    if not _EXEC_READ_RE.search(node_code):
+        return False
+    container = root / node_file
+    if not container.exists():
+        # node.file 相对层级可能不一致（解包目录/包目录差异）：
+        # 按文件名在包内定位（限 5 个候选）
+        cands = [c for c in list(root.rglob(fname))[:5]
+                 if '__pycache__' not in str(c) and '.ddg_output' not in str(c)]
+        if not cands:
+            return False
+        container = cands[0]
+    try:
+        if container.stat().st_size > _MAX_VERSION_FILE_BYTES:
+            return False
+        text = container.read_text(encoding='utf-8', errors='ignore')
+    except Exception:
+        return False
+    low = text.lower()
+    if any(h in low for h in _TEMPLATE_FORBID):
+        return False
+    return True
 
 
 def apply(suspicious_nodes: Dict[str, Dict], graph=None,
@@ -203,14 +250,15 @@ def apply(suspicious_nodes: Dict[str, Dict], graph=None,
             stats['fixture_downgraded'] += 1
             continue
 
-        # 2) 版本检测惯用法：必须真读到目标文件且内容纯净
+        # 2) 版本检测惯用法：路径 1 真读目标文件；路径 2 版本模板形状
         if project_dir is not None:
             code = info.get('label') or info.get('code') or ''
             if 'exec' in code or 'compile' in code:
                 # suspicious dict 只有 label；再从图上取完整 source
                 if graph and graph.has_node(node_id):
                     code = graph.nodes[node_id].get('source') or code
-                if is_version_idiom(code, project_dir):
+                if is_version_idiom(code, project_dir,
+                                    node_file=info.get('file') or ''):
                     info['severity'] = 'low'
                     info['benign_context'] = 'version_file'
                     if graph and graph.has_node(node_id):
