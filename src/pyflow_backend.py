@@ -477,8 +477,9 @@ def build_edges(gir: Dict, nodes: List[Dict], callgraph: Dict,
         defs: Dict[str, str] = {}
         for nid, s in seq:
             tgt = s['target']
-            if tgt and tgt.startswith('%'):
-                defs.setdefault(tgt.strip('[](),').lstrip('%'), nid)
+            # 目标可能是 %vv 临时变量，也可能是裸名（data = decode()）
+            if tgt:
+                defs.setdefault(str(tgt).strip('[](),').lstrip('%'), nid)
             for blob in (s['args'], s['named']):
                 for r in _arg_var_names(blob):
                     src = defs.get(r)
