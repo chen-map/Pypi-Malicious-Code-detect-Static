@@ -173,6 +173,7 @@ def run_gir(project_dir, max_seconds: int = 90) -> Dict:
 def run_callgraph(project_dir, max_seconds: int = 60) -> Dict:
     """pyflow callgraph -r --json-schema unified → graph / unresolved / external"""
     args = ['callgraph', '-r', '--json-schema', 'unified',
+            '--format', 'json',
             '--max-seconds', str(max_seconds), str(project_dir)]
     data = _json_or_none(_run(args, timeout=max_seconds + 60))
     return data if isinstance(data, dict) else {}
