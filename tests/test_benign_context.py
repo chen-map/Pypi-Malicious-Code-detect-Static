@@ -115,6 +115,36 @@ try:
         '    exec(f.read())\n', encoding='utf-8')
     check("路径2: 模板文件含 subprocess → 否",
           not is_version_idiom("exec(f.read())", pkg, node_file='pkg/version.py'))
+
+    # --- 路径 3：oauth2-client 形态（500+500 FP 驱动）---
+    (pkg / 'setup.py').write_text(
+        "__version__ = None\n"
+        "version_file = 'pkg/__init__.py'\n"
+        "with open(version_file, 'r') as f:\n"
+        "    for line in f.readlines():\n"
+        "        if line.find('__version__') >= 0:\n"
+        "            exec(line)\n", encoding='utf-8')
+    check("路径3: setup.py 逐行 exec 版本行 → 是",
+          is_version_idiom("exec(line)", pkg, node_file='setup.py'))
+    check("路径3: 节点带缩进也能匹配",
+          is_version_idiom("            exec(line)", pkg, node_file='setup.py'))
+    check("路径3: exec('常量') 不匹配",
+          not is_version_idiom("exec('x')", pkg, node_file='setup.py'))
+
+    (pkg / 'setup_evil.py').write_text(
+        "import subprocess\n"
+        "with open('v') as f:\n"
+        "    for line in f.readlines():\n"
+        "        exec(line)\n", encoding='utf-8')
+    check("路径3: 容器含 subprocess → 否",
+          not is_version_idiom("exec(line)", pkg, node_file='setup_evil.py'))
+
+    (pkg / 'setup_plain.py').write_text(
+        "with open('v') as f:\n"
+        "    for line in f.readlines():\n"
+        "        exec(line)\n", encoding='utf-8')
+    check("路径3: 无 __version__ 过滤 → 否",
+          not is_version_idiom("exec(line)", pkg, node_file='setup_plain.py'))
 finally:
     shutil.rmtree(root, ignore_errors=True)
 

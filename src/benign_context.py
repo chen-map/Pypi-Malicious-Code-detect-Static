@@ -33,6 +33,8 @@ from typing import Dict, Optional, Set
 
 # exec(f.read()) / exec(x.read(), ...) 形状（路径 2 用）
 _EXEC_READ_RE = re.compile(r'\bexec\s*\(\s*\w+\s*\.\s*read\s*\(\s*\)')
+# exec(<简单变量>) 形状（路径 3 用：逐行 exec 版本行）
+_EXEC_VAR_RE = re.compile(r'^\s*exec\s*\(\s*([a-zA-Z_]\w*)\s*\)')
 
 # 测试/文档目录（与 artifact_scanner._FIXTURE_DIRS 保持一致，跨语言通用）
 FIXTURE_DIRS: Set[str] = {
@@ -165,6 +167,53 @@ def _extract_read_target(node_code: str) -> Optional[str]:
     return None
 
 
+def _line_exec_version_idiom(container: Path) -> bool:
+    """路径 3：oauth2-client 形态（500+500 FP 驱动）。
+
+        with open(version_file) as f:
+            for line in f.readlines():
+                if line.find('__version__') >= 0:
+                    exec(line)
+
+    open 和 exec 分属不同节点、exec 的参数是循环变量——路径 1/2 都
+    解析不到。此形状的判定：容器文件 AST 里有「遍历 readlines 的循环
+    + 块内 exec(<Name>) + 块源码含 __version__ 过滤」，且容器无
+    网络/进程 API（防止把载荷循环 exec 的包伪装成版本检测）。
+    """
+    try:
+        if container.stat().st_size > _MAX_VERSION_FILE_BYTES:
+            return False
+        text = container.read_text(encoding='utf-8', errors='ignore')
+        tree = ast.parse(text)
+    except Exception:
+        return False
+    low = text.lower()
+    if any(h in low for h in _TEMPLATE_FORBID):
+        return False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.For):
+            continue
+        it = node.iter
+        if not isinstance(it, ast.Call):
+            continue
+        f = it.func
+        fname = f.attr if isinstance(f, ast.Attribute) else (
+            f.id if isinstance(f, ast.Name) else '')
+        if fname not in ('readlines', 'read', 'read_split', 'splitlines'):
+            continue
+        seg = ast.get_source_segment(text, node) or ''
+        if '__version__' not in seg:
+            continue
+        for stmt in ast.walk(node):
+            if (isinstance(stmt, ast.Call)
+                    and isinstance(stmt.func, ast.Name)
+                    and stmt.func.id == 'exec'
+                    and stmt.args
+                    and isinstance(stmt.args[0], ast.Name)):
+                return True
+    return False
+
+
 def is_version_idiom(node_code: str, project_dir,
                      node_file: str = '') -> bool:
     """版本检测惯用法（确定性，两条路径）。
@@ -193,32 +242,40 @@ def is_version_idiom(node_code: str, project_dir,
         return False
 
     # ---- 路径 2：版本模板形状（exec(f.read()) 在 _version.py 内）----
-    if not node_file or root is None:
-        return False
-    fname = node_file.replace(chr(92), '/').split('/')[-1].lower()
-    if fname not in _VERSION_TEMPLATE_NAMES:
-        return False
-    if not _EXEC_READ_RE.search(node_code):
-        return False
+    if node_file and root is not None:
+        fname = node_file.replace(chr(92), '/').split('/')[-1].lower()
+        if (fname in _VERSION_TEMPLATE_NAMES
+                and _EXEC_READ_RE.search(node_code)):
+            container = _resolve_container(root, node_file)
+            if container is not None:
+                try:
+                    if container.stat().st_size <= _MAX_VERSION_FILE_BYTES:
+                        text = container.read_text(
+                            encoding='utf-8', errors='ignore')
+                        if not any(h in text.lower()
+                                   for h in _TEMPLATE_FORBID):
+                            return True
+                except Exception:
+                    pass
+
+    # ---- 路径 3：逐行 exec 版本行（oauth2-client 形态，setup.py 等）----
+    if node_file and root is not None and _EXEC_VAR_RE.search(node_code):
+        container = _resolve_container(root, node_file)
+        if container is not None and _line_exec_version_idiom(container):
+            return True
+
+    return False
+
+
+def _resolve_container(root: Path, node_file: str) -> Optional[Path]:
+    """节点文件 → 包内容器路径（直接拼接失败则按文件名定位）"""
     container = root / node_file
-    if not container.exists():
-        # node.file 相对层级可能不一致（解包目录/包目录差异）：
-        # 按文件名在包内定位（限 5 个候选）
-        cands = [c for c in list(root.rglob(fname))[:5]
-                 if '__pycache__' not in str(c) and '.ddg_output' not in str(c)]
-        if not cands:
-            return False
-        container = cands[0]
-    try:
-        if container.stat().st_size > _MAX_VERSION_FILE_BYTES:
-            return False
-        text = container.read_text(encoding='utf-8', errors='ignore')
-    except Exception:
-        return False
-    low = text.lower()
-    if any(h in low for h in _TEMPLATE_FORBID):
-        return False
-    return True
+    if container.exists():
+        return container
+    fname = node_file.replace(chr(92), '/').split('/')[-1]
+    cands = [c for c in list(root.rglob(fname))[:5]
+             if '__pycache__' not in str(c) and '.ddg_output' not in str(c)]
+    return cands[0] if cands else None
 
 
 def apply(suspicious_nodes: Dict[str, Dict], graph=None,

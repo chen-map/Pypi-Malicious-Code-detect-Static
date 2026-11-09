@@ -90,21 +90,33 @@ STRONG_SOURCES = {'network_response', 'socket_recv', 'deserialization',
                   'decoded_data', 'hardcoded_payload'}
 EXFIL_SINKS = {'data_exfiltration'}
 
+# 2026-11 升级门收紧（500+500 四个网络客户端误报驱动）：
+# 强源必须到达【执行/外传】类 sink 才定罪。colcon-metadata（本职拉取
+# 元数据）、pyslack/twirp（API 客户端）的 网络响应→写文件 是**下载器**
+# 形态——良性工具每天都在做；dropper 的区别是下载内容最终被**执行**。
+# network→file_write 止步 SUSPICIOUS；hardcoded_payload 例外（节点本身
+# 含敌意字面量，即单节点证据，不依赖 sink 类别）。
+_STRONG_SOURCE_SINKS = {'code_execution', 'command_execution', 'data_exfiltration'}
+
 
 def escalation_gate(chains: List[Dict]) -> str:
     """判断污点链集合是否满足 SUSPICIOUS→MALICIOUS 自动升级门控。
 
     满足条件（良性软件中罕见的形态）:
-      1. 强源（网络/套接字/反序列化/解码数据）→ 任意 sink
+      1. 强源（网络/套接字/反序列化/解码数据）→ 执行/外传 sink
+         （2026-11 收紧：网络→写文件=下载器形态，不再定罪）
       2. 任意源 → 外传 sink（数据流出即窃取模式）
+      3. hardcoded_payload 源 → 任意 sink（单节点敌意字面量证据）
     返回升级理由字符串；不满足返回 ''。
     在线投票层与离线重判脚本共用此函数，保证口径一致。
     """
     for c in (chains or []):
         src = c.get('source_category', '')
         sink = c.get('sink_category', '')
-        if src in STRONG_SOURCES:
-            return f"污点链 强源[{src}]→[{sink}]"
+        if src == 'hardcoded_payload':
+            return f"污点链 敌意载荷[{src}]→[{sink}]"
+        if src in STRONG_SOURCES and sink in _STRONG_SOURCE_SINKS:
+            return f"污点链 强源[{src}]→执行/外传[{sink}]"
         if sink in EXFIL_SINKS:
             return f"污点链 [{src}]→外传[{sink}]"
     return ''
