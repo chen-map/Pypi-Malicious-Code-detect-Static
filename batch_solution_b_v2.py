@@ -280,6 +280,8 @@ class BatchAnalyzerV20Voting:
         self.pyflow_max_seconds = pyflow_max_seconds
         self.pyflow_capability_model = pyflow_capability_model
         self.coverage_max_skip = coverage_max_skip
+        # 2026-11 合法性通道（正面证据，只能放行不能定罪）
+        self.use_legitimacy = True
         self._full_graph = None   # 当前包的整图快照（_run_ddg_builder 填充）
         self.results = []
         self.results_jsonl = None  # 增量落盘文件（analyze_all 时初始化）
@@ -777,6 +779,38 @@ class BatchAnalyzerV20Voting:
             except Exception as _cg_err:
                 print(f"        [WARN] 覆盖度门控失败: {_cg_err}")
 
+        # ===== 2026-11 合法性通道（正面证据）=====
+        # 铁律：合法性证据只能把 SUSPICIOUS 降为 BENIGN，永不能定罪。
+        # 与"启发式永不定罪"对称：攻击性证据有升权，合法性证据有降权，
+        # 两者不能互相越界。
+        legitimacy_info = None
+        if (voting_result['final_category'] == 'SUSPICIOUS'
+                and self.use_legitimacy):
+            try:
+                from src.legitimacy import assess as assess_legitimacy
+                _g = self._full_graph or {}
+                _caps = set((getattr(self, '_graph_capabilities', {}) or {}).keys())
+                _stats = None
+                try:
+                    _pv = (enhanced_detection_result or {}).get('pypi_verification') or {}
+                    _stats = _pv.get('release_stats') if _pv.get('status') == 'exists' else None
+                except Exception:
+                    _stats = None
+                legitimacy_info = assess_legitimacy(
+                    package_dir, _g.get('nodes') or [], _caps, pypi_stats=_stats)
+                if legitimacy_info.get('allow_benign'):
+                    print(f"        [合法性通道] SUSPICIOUS → BENIGN "
+                          f"(score={legitimacy_info['score']})")
+                    voting_result['final_category'] = 'BENIGN'
+                    voting_result['voting_summary'] = (
+                        f"[合法性] 行为与声明一致 (score={legitimacy_info['score']}): "
+                        + '; '.join(legitimacy_info.get('reasons', [])[:2])
+                        + ' | ' + (voting_result.get('voting_summary') or '')[:150])
+                    voting_result['final_confidence'] = max(
+                        float(voting_result.get('final_confidence') or 0.5), 0.7)
+            except Exception as _leg_err:
+                print(f"        [WARN] 合法性通道失败: {_leg_err}")
+
         # 精简格式：只保留核心字段
         final_result = {
             'package_name': package_name,
@@ -807,6 +841,10 @@ class BatchAnalyzerV20Voting:
             # 2026-11 图后端与覆盖度审计
             'graph_backend': getattr(self, '_graph_backend', 'builtin'),
             'coverage': coverage_info,
+            'legitimacy': ({'score': legitimacy_info.get('score'),
+                            'allow_benign': legitimacy_info.get('allow_benign'),
+                            'reasons': legitimacy_info.get('reasons')}
+                           if legitimacy_info else None),
             'capabilities': (getattr(self, '_graph_capabilities', {}) or None),
             'execution_phases': (getattr(self, '_graph_phases', {}) or None),
             'llm_pipeline': self.llm_pipeline,
