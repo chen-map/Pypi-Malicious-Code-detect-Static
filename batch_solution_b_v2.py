@@ -916,6 +916,16 @@ class BatchAnalyzerV20Voting:
                                        max_blocks=max_blocks)
             import time as _time
             t0 = _time.time()
+            # 归一化：expand_clusters 返回 dict，_split_blocks 返回 4 元组
+            _norm = []
+            for _b in blocks:
+                if isinstance(_b, dict):
+                    _norm.append((_b.get('label'), _b.get('nodes') or [],
+                                  _b.get('edges') or [],
+                                  _b.get('boundary_edges') or {}))
+                else:
+                    _norm.append(tuple(_b)[:4])
+            blocks = _norm
             block_results, all_paths = [], []
             mal_blocks = []
             for label, b_nodes, b_edges, b_boundary in blocks:
