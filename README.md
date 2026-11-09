@@ -286,37 +286,54 @@ registry verdicts, no API-name danger labels feeding the judge.
 
 | Corpus | Size | Detection | False positives |
 |---|---|---|---|
-| Malicious (Backstabber's Knife Collection lineage) | 500 | **90%** (majority vote) | — |
-| Malicious, full run (v1 path) | 5000 | 85% direct, ~89% after evidence-gated re-judgment | — |
+| Malicious (Backstabber's Knife Collection lineage) | 500 | **92.4%** (462/500, latest run) | — |
 | Malicious, full registry channel | 5000 | **94.9%** (99.6% via PyPI 404 on this corpus) | — |
 | Benign, real PyPI packages (incl. adversarial: `cffi`, `ag2` w/ 1136 fn, `acryl-*` forks) | 58 | — | **0 hard false positives** |
-| Benign, fresh PyPI small packages (in progress) | ~500 | — | tracking to 0–1 |
+| Benign, fresh PyPI packages, alphabet-stratified random sample (latest run) | 500 | — | 7 hard (1.4%); 4 verified as network-client libraries (fixed by gate refinement), 2 likely genuine malware in the corpus, 1 version-anomaly pending |
 
-Ablations that isolate the contributions:
+Latest full run (deterministic context downgrade + SSO wiring + large-package
+fast path + tightened escalation gate):
 
-| Ablation | Effect |
+| Metric | Value |
 |---|---|
-| Remove statement-sequence edges | recall 75% → 58% (−17) |
-| Remove LLM chains (regex-driven pipeline only) | recall → 22% on this corpus |
-| Remove all symbolic hints from the digest (labels + ordering) | **no change** — the model reads code, not the regex layer |
-| Add package-intent context + IOC table | 85% → 92% (interim, in progress) |
-| Add registry channel (PyPI 404) | → 94.9% total; catches pure name-squatting that code analysis *should not* convict |
+| Malicious recall (500) | **92.4%**, 0 ANALYSIS_FAILED |
+| Benign hard FP (500) | 1.4% — **zero** caused by block scanning (27 triggers, 10 verified chains, 0 wrong escalations) |
+| Benign SUSPICIOUS rate | 16.3% → **6.2%** (deterministic context downgrade) |
 
-**The complementarity argument, with numbers:** on this corpus the graph+LLM
-channel reaches ~90% while the registry channel alone would catch ~78%
-(name fabrication); code analysis is the *only* channel that can catch a
-real-name package with injected code (XMRig-mining `requess`), and the registry
-channel is the only one that can catch a name-squat whose code is a clean copy.
-Neither subsumes the other.
+Ablations that isolate the contributions (100+100, same seed/corpus):
+
+| Config | Malicious recall | Benign hard FP |
+|---|---|---|
+| Baseline | 83% | 1.0% |
+| + cross-scope evidence (boundary edges + global chain distribution) | 84% | 1.0% |
+| + block scanning (whole-graph read on ambiguity) | **89%** | 3.1% → 1.4% after the gate refinements below |
+
+Gate refinements forced by the FP attribution (all deterministic, no prompt
+changes):
+
+| Refinement | Effect |
+|---|---|
+| Escalation requires a hostile literal on the verified chain | `google_re2` (a regex library) no longer escalates; 0 wrong escalations in the 500-run |
+| Strong source must reach an execution/exfil sink | `network→file_write` (downloader shape) no longer convicts; fixed 4 network-client library FPs |
+| Line-exec version idiom (setup.py `for line in f: if '__version__': exec(line)`) | fixed `oauth2-client` FP |
+| Test/fixture dirs and version-file idioms downgraded deterministically | benign SUSPICIOUS 16.3% → 6.2% |
+
+**The complementarity argument, with numbers:** the graph+LLM channel reaches
+~92% while the registry channel alone would catch ~78% (name fabrication);
+code analysis is the *only* channel that can catch a real-name package with
+injected code (XMRig-mining `requess`), and the registry channel is the only
+one that can catch a name-squat whose code is a clean copy. Neither subsumes
+the other.
 
 ### Testing
 
-14 test files, 200+ assertions, all green. The graph-LLM interface suites pin
+17 test files, 300+ assertions, all green. The graph-LLM interface suites pin
 the anti-hallucination contract (hallucinated nodes/edges rejected, partial
 paths preserved, single-node claims require hostile literals) and the evidence
 gates (weak chains cannot convict, idiom knowledge does not release true
-malware) — these are exactly the behaviors that regressed under time pressure
-during development, which is why they are tests now.
+malware, downloader-shaped flows stay SUSPICIOUS) — these are exactly the
+behaviors that regressed under time pressure during development, which is why
+they are tests now.
 
 
 ---

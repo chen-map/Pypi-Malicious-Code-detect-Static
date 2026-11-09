@@ -1091,3 +1091,49 @@ data_files=[("Lib/site-packages", ["data/evil.pth"])]
 真正的 Artifact 层(图上的 Artifact 节点 + contains/references 边),
 让"setup.py 的 data_files → evil.pth → import 行"成为**一条可验证的链**,
 而不只是旁路文本。这是下一阶段。
+
+---
+
+# 第十三轮:500+500 终验 + 机械修复两连(2026-11-08/09)
+
+## 验证结果(500 恶意 + 500 良性,跨字母表随机,seed=20261108)
+
+| 指标 | 本轮 | 上一轮同规模 |
+|---|---|---|
+| 恶意召回 | **92.4%** (462/500) | 89.5% |
+| 良性硬误报 | **1.4%** (7/500) | ~0.4%(其中2个实为真恶意) |
+| 良性 SUSPICIOUS 率 | **6.2%** (31/500) | 16.3%(100包轮) |
+| ANALYSIS_FAILED | **0** | 大包成片超时 |
+
+零超时 = SSO 接线(>150文件走子集建图) + 大包快路径(>200子图跳过
+20次LLM投票,块划分升主路径)的联合效果。块划分触发 22/27 次
+(mal/ben),升级 10 次全部要求敌意字面量(google_re2 教训),**0 误升级**。
+
+## 401 事件复盘
+跑批中 1946 次 API 401。归因:run_500.sh 里 `awk "{print \$2}"` 经多层
+shell 转义,\$2 被吞,KEY 提取为空串。修复:KEY 走 python 脚本提取到
+`.glm_key` 文件(零 shell 转义)。与用户同期删除智谱后台 key 的时间撞车,
+造成误判——评测 key(1d56e7be)自始至终有效。
+
+## FP 人工核实(7 个全查)
+- 2 个注册表通道:subprocess.run-0.0.8(包名即抢注,几乎必真恶意,
+  语料污染)、iso4217-1.16.20260101(版本异常待定)
+- 4 个 LLM 通道同一根因:网络客户端库(pyslack/twirp/colcon-metadata/
+  artifactory)的本职就是 HTTP,网络响应→写文件=下载器形态被定罪
+- 1 个新惯用法:oauth2-client 的 setup.py 逐行 exec(line) 读版本号
+
+## 修复两连
+1. **escalation_gate 规则 1 收紧**:强源必须到达执行/外传 sink;
+   network→file_write=下载器形态降为弱链(SUSPICIOUS)。
+   hardcoded_payload 例外(单节点敌意证据,sink 类别无关)。
+   规则 2(任意源→外传)不变。
+2. **benign_context 路径 3**:逐行 exec 版本行(for line in
+   readlines(): if '__version__': exec(line)),AST 形状识别
+   + 容器无网络/进程 API 守卫。
+
+## 已知边界(下一阶段)
+- requests.post 的类别是 data_exfiltration——API 客户端与真外传在
+  类别层面不可分,需要 IOC 目标感知(裸 IP/oastify/矿池=攻击设施,
+  PKG-INFO 域名=自有服务)→ Artifact/IOC 层
+- quarejma-botnet 漏检:0 子图(混淆盲区)
+- lan_clean 漏检:func_run_critical 被 LLM 判 BENIGN,待复核
