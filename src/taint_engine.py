@@ -212,7 +212,10 @@ def analyze(nodes: List[Dict], edges: List[Dict]) -> List[Dict]:
         [{'sink': {...}, 'sink_category': str, 'source': {...},
           'source_category': str, 'steps': [{'stage','node_id','code','file','line'}]}]
     """
-    if not nodes or not edges:
+    # 2026-11：没有边也要跑——单节点硬编码载荷（dropper/编码载荷）
+    # 不依赖任何数据流边。此前 `not edges` 直接返回，导致
+    # 0 边的小包（tlsshield/tlsproxies 族）永远拿不到强链。
+    if not nodes:
         return []
 
     node_map = {n.get('node_id'): n for n in nodes if n.get('node_id')}
