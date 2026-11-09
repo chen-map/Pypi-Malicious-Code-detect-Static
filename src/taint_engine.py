@@ -54,6 +54,48 @@ HARDCODED_PAYLOAD_PATTERNS = [
     (r'socket\.socket\([^)]*\)[^\n]*connect\(', 'reverse_shell'),
 ]
 
+
+# 解码后的载荷里出现这些 = 远程加载/执行/外传（编码载荷的恶意判据）
+_DECODED_MALICIOUS = (
+    (r'urlopen\s*\(', 'remote_fetch'),
+    (r'urllib\.(request|urlretrieve)', 'remote_fetch'),
+    (r'requests\.(get|post)\s*\(', 'remote_fetch'),
+    (r'https?://[^\s' + chr(34) + r']{6,}', 'remote_url'),
+    (r'(exec|eval)\s*\(', 'dynamic_exec'),
+    (r'__import__\s*\(', 'dynamic_import'),
+    (r'subprocess\.|os\.system|popen', 'command_exec'),
+    (r'socket\.|/dev/tcp', 'reverse_shell'),
+    (r'(curl|wget)\s+[^' + chr(10) + r'|]*\|\s*(sh|bash)', 'download_pipe'),
+    (r'stratum\+|supportxmr|pool\.', 'miner'),
+)
+
+
+def _decoded_payload_kind(code: str) -> str:
+    """编码载荷检测：解一层，看解出来的内容是不是恶意代码/地址。
+
+    不解执行、不递归爆炸（literal_decoder 内部限 3 层且有大小上限）。
+    返回 payload_kind 或 ''。
+    """
+    if not code or ('base64' not in code and 'b64decode' not in code
+                    and 'marshal' not in code and 'fromhex' not in code
+                    and 'unhexlify' not in code and not any(
+                        c in code for c in ('"', "'"))):
+        return ''
+    try:
+        from src.literal_decoder import scan_code
+        hits = scan_code(code, max_literals=4)
+    except Exception:
+        return ''
+    for h in hits or []:
+        dec = h.get('decoded') or ''
+        if len(dec) < 20:
+            continue
+        for pat, kind in _DECODED_MALICIOUS:
+            if re.search(pat, dec, re.IGNORECASE):
+                return f'encoded_{kind}'
+    return ''
+
+
 # 危险汇聚点
 SINK_PATTERNS = [
     (r'(?<![\w.])exec\s*\(', 'code_execution'),
@@ -247,7 +289,15 @@ def analyze(nodes: List[Dict], edges: List[Dict]) -> List[Dict]:
         code = sink_node.get('code', '') or ''
         payload_kind = _match(HARDCODED_PAYLOAD_PATTERNS, code)
         if not payload_kind:
-            continue
+            # 2026-11 编码载荷（requsets 族驱动）：真实形态是
+            #   exec(base64.b64decode(b'ZXhlYyhfX2ltcG9ydF9f...'))
+            # 载荷是"解出来才是恶意代码"的编码串。之前只匹配明文特征，
+            # 于是这批包 LLM 判了恶意却被机械复核以"无结构性证据"降级。
+            # 我们已有确定性解码器：解一层，内容命中恶意特征即视为
+            # hardcoded_payload（不解执行，只扫文本）。
+            payload_kind = _decoded_payload_kind(code)
+            if not payload_kind:
+                continue
         sink_id = sink_node.get('node_id')
         if not sink_id:
             continue

