@@ -76,7 +76,7 @@ def _printable_ratio(s: str) -> float:
 def _try_decompress_chain(raw_b64: str) -> Optional[str]:
     """base64 解出来若是压缩流（zlib/gzip/bz2/lzma），再解一层。
 
-    只解一层压缩——多层嵌套留给"解一层看结果"的迭代，不做递归爆炸。
+    只解一层压缩——多层嵌套交给 peel() 的迭代。
     """
     t = raw_b64.replace('-', '+').replace('_', '/')
     pad = (-len(t)) % 4
@@ -84,14 +84,18 @@ def _try_decompress_chain(raw_b64: str) -> Optional[str]:
         raw = base64.b64decode(t + '=' * pad, validate=False)
     except Exception:
         return None
-    if len(raw) < 8:
+    return _decompress_bytes(raw)
+
+
+def _decompress_bytes(raw: bytes) -> Optional[str]:
+    if not raw or len(raw) < 8:
         return None
-    for name, fn in (('zlib', lambda b: zlib.decompress(b)),
-                     ('gzip', lambda b: zlib.decompress(b, 16 + zlib.MAX_WBITS))):
+    for fn in (lambda b: zlib.decompress(b),
+               lambda b: zlib.decompress(b, 16 + zlib.MAX_WBITS)):
         try:
             return fn(raw).decode('utf-8', errors='ignore')
         except Exception:
-            continue
+            pass
     try:
         import bz2
         return bz2.decompress(raw).decode('utf-8', errors='ignore')
@@ -105,8 +109,142 @@ def _try_decompress_chain(raw_b64: str) -> Optional[str]:
     return None
 
 
+# ===== marshal 静态检查（超级混淆的主力武器）=====
+# 恶意包常用 `exec(marshal.loads(b64decode(...)))` 藏字节码。
+# marshal.loads **不执行代码**，只反序列化——我们可以安全地读出
+# code object 的 co_consts / co_names，拿到载荷字符串与 API 名。
+_MARSHAL_MAX = 262144     # 256KB 上限，防解析爆炸
+
+
+def _walk_code_strings(co, out: List[str], depth: int = 0) -> None:
+    """递归收集 code object 里的字符串常量与名字（不执行任何代码）"""
+    if depth > 6 or len(out) >= 40:
+        return
+    consts = getattr(co, 'co_consts', ()) or ()
+    for c in consts:
+        if isinstance(c, str) and 4 <= len(c) <= 2000:
+            out.append(c)
+        elif hasattr(c, 'co_consts'):
+            _walk_code_strings(c, out, depth + 1)
+    for n in list(getattr(co, 'co_names', ()) or ())[:40]:
+        if isinstance(n, str) and 2 <= len(n) <= 60:
+            out.append(n)
+
+
+def inspect_marshal(raw: bytes) -> List[str]:
+    """静态读取 marshal 字节码里的字符串（绝不执行）。
+
+    Returns:
+        值得注意的字符串列表（载荷/URL/API 名）
+    """
+    import marshal
+    if not raw or len(raw) > _MARSHAL_MAX:
+        return []
+    try:
+        co = marshal.loads(raw)
+    except Exception:
+        return []
+    out: List[str] = []
+    try:
+        if hasattr(co, 'co_consts'):
+            _walk_code_strings(co, out)
+    except Exception:
+        pass
+    # 去重保序
+    seen = set()
+    uniq = []
+    for s in out:
+        if s in seen:
+            continue
+        seen.add(s)
+        uniq.append(s)
+    return uniq[:20]
+
+
+def peel(s: str, max_layers: int = 3) -> List[Dict]:
+    """多层剥离：base64/hex → 解压 → 再 base64…最多 max_layers 层。
+
+    每一层的可读结果都会收集（不只最后一层）——中间层常有 URL。
+    marshal 字节码会被静态检查（不执行）。
+    """
+    results: List[Dict] = []
+    seen = set()
+    cur_text = s
+    cur_bytes: Optional[bytes] = None
+
+    def _add(method: str, txt: str):
+        if not txt or txt in seen or len(txt) > _MAX_OUTPUT:
+            return
+        if _printable_ratio(txt) < 0.75 or not _looks_meaningful(txt):
+            return
+        seen.add(txt)
+        results.append({'method': method, 'decoded': txt})
+
+    for layer in range(max_layers):
+        # 尝试 base64
+        b64txt = cur_text.replace('-', '+').replace('_', '/')
+        pad = (-len(b64txt)) % 4
+        raw = None
+        try:
+            raw = base64.b64decode(b64txt + '=' * pad, validate=False)
+        except Exception:
+            pass
+        if raw is None or not raw:
+            break
+        # 先看是不是 marshal 字节码（超级混淆主力）
+        strings = inspect_marshal(raw)
+        if strings:
+            for st in strings:
+                if len(st) >= 4:
+                    results.append({
+                        'method': f'marshal-L{layer + 1}',
+                        'decoded': st[:_MAX_OUTPUT],
+                    })
+            return results
+        # 压缩流？
+        dec = _decompress_bytes(raw)
+        if dec is not None:
+            _add(f'zlib-L{layer + 1}', dec)
+            cur_text = dec
+            continue
+        # 纯文本？
+        txt = raw.decode('utf-8', errors='ignore')
+        if _printable_ratio(txt) >= 0.75:
+            _add(f'base64-L{layer + 1}', txt)
+            cur_text = txt
+            continue
+        break
+    return results
+
+
+_WORD_RE = re.compile(r'[A-Za-z]{3,}')
+
+
+def _looks_meaningful(txt: str) -> bool:
+    """解出的文本是否"像内容"而不是二进制残留。
+
+    UTF-8 ignore 解码会丢掉非法字节，剩下的 ASCII 可能凑出高可打印率
+    （实测：bytes(range(256)) 的 base64 → 通过 75% 可打印率检查）。
+    真正的判据是**控制字符占比**：正常代码/文本几乎没有控制字符，
+    二进制转来的"伪文本"必然带一堆。
+    """
+    if not txt or len(txt) < 6:
+        return False
+    ctrl = sum(1 for ch in txt
+               if ord(ch) < 32 and ch not in chr(10) + chr(13) + chr(9))
+    if ctrl / len(txt) > 0.02:
+        return False
+    low = txt.lower()
+    if any(k in low for k in ('http', 'os.', 'exec', 'import', 'system',
+                              'socket', 'curl', 'wget', 'subprocess', '.com',
+                              '.net', 'stratum', 'base64')):
+        return True
+    words = _WORD_RE.findall(txt)
+    return len(words) >= 2
+
+
 def decode_literal(s: str) -> List[Dict]:
-    """尝试把单个字符串常量解一层。
+    """尝试把单个字符串常量解一层（多层交给 peel）。
 
     Returns:
         [{'method': 'base64', 'decoded': '...'}, ...]（可能多解，去重）
@@ -119,31 +257,24 @@ def decode_literal(s: str) -> List[Dict]:
     def _add(method: str, txt: Optional[str]):
         if not txt or txt in seen:
             return
-        if _printable_ratio(txt) < 0.75:
+        if _printable_ratio(txt) < 0.75 or not _looks_meaningful(txt):
             return
         seen.add(txt)
         out.append({'method': method, 'decoded': txt[:_MAX_OUTPUT]})
 
-    # base64 家族（含 urlsafe）
+    # 多层剥离（含 marshal 静态检查）——超级混淆主力
+    for r in peel(s, max_layers=3):
+        if r['decoded'] not in seen:
+            seen.add(r['decoded'])
+            out.append(r)
+
+    # 单层变换（peel 没覆盖的形态）
     d = _b64(s)
     _add('base64', d)
-    # base64 内层是压缩流 → 再解一层（skip 掉二进制乱码）
-    if d is not None and _printable_ratio(d) < 0.9:
-        _add('base64+zlib', _try_decompress_chain(s))
-    # base32（全大写 A-Z2-7 特征）
     if re.fullmatch(r'[A-Z2-7=]{20,}', s or ''):
         _add('base32', _b32(s))
-    # hex
     if re.fullmatch(r'[0-9a-fA-F]{20,}', s or ''):
         _add('hex', _hex(s))
-    # 压缩：把已解出的 base64/hex 再尝试 zlib
-    for method, txt in list((('zlib-from-base64', d),)):
-        if txt:
-            try:
-                _add('zlib', _zlib_decompress(txt.encode('latin-1', errors='ignore')))
-            except Exception:
-                pass
-    # rot13（只在结果明显可读时采纳）
     try:
         r13 = codecs.decode(s, 'rot13')
         if _printable_ratio(r13) > 0.95 and re.search(r'[a-zA-Z]{4,}', r13):

