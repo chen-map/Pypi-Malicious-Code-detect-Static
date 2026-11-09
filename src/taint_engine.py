@@ -136,8 +136,12 @@ SINK_PATTERNS = [
 # 可达 os.environ 与 b64decode，主来源应归因到环境变量。
 # 2026-10 提升为模块级:函数摘要等外部消费者也需要。
 SOURCE_PRIORITY = {cat: rank for rank, cat in enumerate([
-    'environment', 'cli_args', 'user_input', 'network_response',
-    'file_read', 'socket_recv', 'deserialization', 'decoded_data',
+    # 2026-11 credentials 排最前：读凭据比"读普通文件"信息量大得多。
+    # 不计入排序时它会被 file_read 抢走归因（ssc 样本实测：
+    # open(kube_dir) 被认成 file_read，链降为弱链）。
+    'credentials', 'environment', 'cli_args', 'user_input',
+    'network_response', 'file_read', 'socket_recv', 'deserialization',
+    'decoded_data',
 ])}
 
 
