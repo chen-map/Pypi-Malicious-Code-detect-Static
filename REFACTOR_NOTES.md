@@ -1137,3 +1137,53 @@ shell 转义,\$2 被吞,KEY 提取为空串。修复:KEY 走 python 脚本提取
   PKG-INFO 域名=自有服务)→ Artifact/IOC 层
 - quarejma-botnet 漏检:0 子图(混淆盲区)
 - lan_clean 漏检:func_run_critical 被 LLM 判 BENIGN,待复核
+
+---
+
+# 第十四轮:v3 — PyFlow 换底 + 函数目录/簇交付 + 两阶段接线(2026-11)
+
+## 架构变化
+- **分析底座换成 PyFlow**(ZJU-PL, arXiv 2608.07026):IFDS + GIR + 调用图 + 别名 + escape + 覆盖度
+- **图构建补四层**:能力映射(20→11+credential_access)、执行时机、语句级过程间边、IOC 目标感知
+- **交付单位从"预算切块"改成"函数簇"**:目录 585 函数 → 打分 → 种子 + 2 跳调用闭包 + 短路径中间函数
+- **两阶段真正接线**:小模型提链、程序验证、大模型判定(此前 analyze_two_stage 只有测试在调)
+- **覆盖度门控**:unknown ≠ safe,跳过 >30% 且无 Tier-1 时禁止 BENIGN
+
+## 评测(100 恶意 + 100 良性,同 seed)
+
+| | 恶意 | 良性 |
+|---|---|---|
+| MALICIOUS | 98% | 0% |
+| SUSPICIOUS | 1% | 7% |
+| BENIGN | 1% | 93% |
+
+对比 v2 500+500:92.4% / 1.4% / 6.2%。**+8 召回,零误报增长。**
+
+## 七个静默失败(本轮的真正工作量)
+1. `_full_graph` 在 try 块内赋值 → 0 边包让 AttackChainRebuilder 抛异常,块扫描静默关闭
+2. 簇 dict 当 4 元组解包 → 两阶段 `too many values to unpack`,被外层 except 吞成一行 WARN
+3. **shim 节点键不一致**(绝对路径_行_列 vs 相对路径_行_列)→ **PyFlow 后端整条管线产 0 边**
+4. `__slots__` 漏 `_nid` → AttributeError
+5. taint 在 `not edges` 时提前返回 → 字面量载荷 dropper 永远无强链
+6. 凭据路径不是 taint 强源(`~/.kube/config`、`~/.ssh/id_rsa`、被 os.path.join 拆开的形态)
+7. `setup.py` 函数体判为 runtime → cmdclass 安装钩子隐形
+
+其中 3 个不报错、不告警、不留日志。教训:每道门都要有"确实触发过"的断言。
+
+## 新增规则(全部有良性对照)
+- `literal_remote_exec`:dropper 把下载器写成明文字面量
+- `remote_exec_text`:`exec(__import__('requests').get(url).text)`
+- `endpoint_literal`:网络调用 + 裸 IP
+- `data_exfil_get`:GET 外传,**只在目标是攻击设施时定罪**
+- `credentials` 作为强源,优先级排在 environment 之前
+
+## 混淆对抗(L1-L6 实测)
+- L5 `exec(marshal.loads(b64))` → 静态读 co_consts/co_names,不解执行就拿到载荷
+- L6 base64→zlib×3 → 有界剥离(≤3 层)
+- 良性对照:二进制 blob 不产生伪解出,`os.popen('git rev-parse').read()` 不误伤
+
+## 仍不足
+- 7% 良性 SUSPICIOUS = 有能力证据、缺意图证据 → 需要**合法性通道**(正面证据,只能放行)
+- 跨函数边仍比函数内粗(无完整指针分析)
+- 自定义 VM / 运行时密钥不透明 → 动态(audit hook)是下一步
+- 良性比恶意慢 5 倍(歧义触发簇分析)
