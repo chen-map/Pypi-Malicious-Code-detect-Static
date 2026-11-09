@@ -334,7 +334,13 @@ def build_nodes(gir: Dict, caps: Dict, project_dir: Path,
     nodes: List[Dict] = []
     seen: Set[str] = set()
     root = Path(project_dir)
-    for unit, stmts in _gir_units(gir):
+    # 2026-11 归属顺序（实测驱动）：GIR 的 `<模块>_gir.json` 单元是**整文件
+    # 超集**（test_requests.py 的 module 单元含 3320 条语句、覆盖 L1-2760），
+    # 若先处理它，所有节点的 function_name 都会变成 <module>（实测 67-86%）。
+    # 先处理具体函数单元，再用 module 单元补剩余的模块级语句。
+    _units = _gir_units(gir)
+    _units.sort(key=lambda kv: (kv[0].endswith('.<module>'), kv[0]))
+    for unit, stmts in _units:
         # unit 形如 "setup.<module>" / "pkg.mod.func"
         head = unit.split('@')[0]
         for raw in stmts:
