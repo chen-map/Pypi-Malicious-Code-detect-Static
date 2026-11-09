@@ -227,6 +227,45 @@ def _stmt_of(stmt: Dict) -> Dict:
     }
 
 
+def _build_file_index(project_dir: Path) -> Dict[str, str]:
+    """点分模块名 → 绝对路径。
+
+    PyFlow 的 GIR 语句不带 filename，但每条都有 unit_id，形如
+    `ab100.pkgs_C_mal.blypack-0.2.setup.<module>`——即
+    `<相对路径的点分形式>.<qualname>`。这里建立反查索引。
+    """
+    idx: Dict[str, str] = {}
+    root = Path(project_dir)
+    for p in root.rglob('*.py'):
+        if '__pycache__' in str(p):
+            continue
+        try:
+            rel = p.relative_to(root).with_suffix('')
+        except ValueError:
+            continue
+        dotted = str(rel).replace(chr(92), '/').replace('/', '.')
+        idx[dotted] = str(p.resolve())
+    return idx
+
+
+def _resolve_unit_file(unit_id: str, file_index: Dict[str, str]):
+    """unit_id → (绝对路径, 函数名)。最长点分前缀匹配。"""
+    if not unit_id:
+        return '', '<module>'
+    best = ''
+    for dotted in file_index:
+        if unit_id == dotted or unit_id.startswith(dotted + '.'):
+            if len(dotted) > len(best):
+                best = dotted
+    if not best:
+        return '', '<module>'
+    rest = unit_id[len(best):].lstrip('.')
+    func = rest.split('.')[-1] if rest else '<module>'
+    if not func or '<module>' in func:
+        func = '<module>'
+    return file_index[best], func
+
+
 def build_nodes(gir: Dict, caps: Dict, project_dir: Path) -> List[Dict]:
     """GIR 语句 → 我们的节点 dict（语句级，带真实行号与源码）。
 
@@ -242,24 +281,29 @@ def build_nodes(gir: Dict, caps: Dict, project_dir: Path) -> List[Dict]:
         key = (str(Path(loc['file']).resolve()), int(loc.get('line') or 0))
         cap_by_loc.setdefault(key, set()).add(cap)
 
+    file_index = _build_file_index(project_dir)
     nodes: List[Dict] = []
     seen: Set[str] = set()
     root = Path(project_dir)
     for unit, stmts in _gir_units(gir):
         # unit 形如 "setup.<module>" / "pkg.mod.func"
         head = unit.split('@')[0]
-        func_name = head.rsplit('.', 1)[-1] if '.' in head else head
-        if head.endswith('.<module>'):
-            func_name = '<module>'
         for raw in stmts:
             s = _stmt_of(raw)
             if s['row'] is None:
                 continue                       # method_decl 之类无坐标
             fpath = raw.get('file') or raw.get('filename') or ''
+            func_name = head.rsplit('.', 1)[-1] if '.' in head else head
+            if head.endswith('.<module>'):
+                func_name = '<module>'
+            if fpath:
+                fpath = str(Path(fpath).resolve())
+            else:
+                # 真实 PyFlow GIR 不带 filename，但每条有 unit_id
+                fpath, func_name = _resolve_unit_file(
+                    raw.get('unit_id') or '', file_index)
             if not fpath:
-                # GIR 顶层不带文件名时，用 unit 名反查源文件
                 continue
-            fpath = str(Path(fpath).resolve()) if fpath else ''
             line1 = int(s['row']) + 1          # GIR 0-based → 1-based
             code = _source_line(fpath, line1)
             if not code:
@@ -313,6 +357,7 @@ def build_edges(gir: Dict, nodes: List[Dict], callgraph: Dict,
                       'is_cross_file': by_id[a]['file'] != by_id[b]['file']})
 
     root = Path(project_dir)
+    file_index = _build_file_index(project_dir)
     for unit, stmts in _gir_units(gir):
         head = unit.split('@')[0]
         # --- control：同 unit 语句顺序（保留我们已验证的 +17% 机制）---
@@ -321,11 +366,15 @@ def build_edges(gir: Dict, nodes: List[Dict], callgraph: Dict,
             s = _stmt_of(raw)
             if s['row'] is None:
                 continue
-            fpath = str(Path(raw.get('file') or '').resolve()) if raw.get('file') else ''
+            fpath = raw.get('file') or raw.get('filename') or ''
+            if fpath:
+                fpath = str(Path(fpath).resolve())
+            else:
+                fpath, _fn = _resolve_unit_file(raw.get('unit_id') or '', file_index)
             if not fpath:
                 continue
             try:
-                rel = str(Path(fpath).relative_to(root)).replace('\\', '/')
+                rel = str(Path(fpath).relative_to(root)).replace(chr(92), '/')
             except Exception:
                 rel = Path(fpath).name
             nid = f"{rel}:{int(s['row']) + 1}:{s['col']}"
