@@ -163,7 +163,8 @@ def _flagged_code_signals(verdicts, subgraph_jsons, max_funcs=4, max_chars=1200)
 
 
 def _llm_escalation_corroborated(enhanced_detection_result, voting_result,
-                                 ignore_pypi_gate=False, block_scan=None):
+                                 ignore_pypi_gate=False, block_scan=None,
+                                 subgraph_jsons=None):
     """包级 LLM 升级 MALICIOUS 的机械复核（2026-11）。
 
     弱模型实测会无视 prompt 判据（良性 fork 名被 "typosquatting high" 或
@@ -182,7 +183,17 @@ def _llm_escalation_corroborated(enhanced_detection_result, voting_result,
     #  导致 strong_chain 误判为 True,弱链升级被放行。）
     flagged = [v for v in (voting_result or {}).get('subgraph_verdicts', [])
                if v.get('final_verdict') in ('SUSPICIOUS', 'MALICIOUS')]
-    strong_chain = any(escalation_gate(v.get('taint_chains')) for v in flagged)
+    # 目标感知需要节点代码：从 subgraph_jsons 按名取回
+    _sg_nodes = {}
+    if subgraph_jsons:
+        _by_name = {s.get('subgraph_name'): s for s in subgraph_jsons}
+        for v in flagged:
+            _sg_nodes[v.get('subgraph_name')] = \
+                (_by_name.get(v.get('subgraph_name')) or {}).get('nodes')
+    strong_chain = any(
+        escalation_gate(v.get('taint_chains'),
+                        nodes=_sg_nodes.get(v.get('subgraph_name')))
+        for v in flagged)
     if ed_lvl == 'critical':
         return True, '增强通道 critical'
     if strong_chain:
@@ -668,7 +679,8 @@ class BatchAnalyzerV20Voting:
                         ok, why = _llm_escalation_corroborated(
                             enhanced_detection_result, voting_result,
                             ignore_pypi_gate=self.ignore_pypi_gate,
-                            block_scan=block_scan)
+                            block_scan=block_scan,
+                            subgraph_jsons=subgraph_jsons)
                         if not ok:
                             new_cat = 'SUSPICIOUS'
                             voting_result['llm_escalation_demoted'] = True
@@ -695,7 +707,8 @@ class BatchAnalyzerV20Voting:
             _ok, _why = _llm_escalation_corroborated(
                 enhanced_detection_result, voting_result,
                 ignore_pypi_gate=self.ignore_pypi_gate,
-                block_scan=block_scan)
+                block_scan=block_scan,
+                subgraph_jsons=subgraph_jsons)
             if not _ok:
                 print(f"        [最终保险] MALICIOUS 无结构性证据({_why}) → SUSPICIOUS")
                 voting_result['final_category'] = 'SUSPICIOUS'
@@ -1206,7 +1219,12 @@ Output JSON:
             escalation_reasons = []
             escalated_verdicts = []
             for v in suspicious_verdicts:
-                reason = escalation_gate(v.get('taint_chains'))
+                # 2026-11 目标感知：把子图节点传给门，EXFIL sink 按
+                # 目的地分层定罪（twirp/pyslack 类自有服务不再定罪）
+                reason = escalation_gate(
+                    v.get('taint_chains'),
+                    nodes=v.get('nodes') or None,
+                    project_dir=package_dir)
                 if reason:
                     escalation_reasons.append(f"{v.get('subgraph_name', '?')}: {reason}")
                     escalated_verdicts.append(v)

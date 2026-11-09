@@ -99,22 +99,44 @@ EXFIL_SINKS = {'data_exfiltration'}
 _STRONG_SOURCE_SINKS = {'code_execution', 'command_execution', 'data_exfiltration'}
 
 
-def escalation_gate(chains: List[Dict]) -> str:
+def escalation_gate(chains: List[Dict], nodes: List[Dict] = None,
+                    project_dir=None) -> str:
     """判断污点链集合是否满足 SUSPICIOUS→MALICIOUS 自动升级门控。
 
     满足条件（良性软件中罕见的形态）:
       1. 强源（网络/套接字/反序列化/解码数据）→ 执行/外传 sink
          （2026-11 收紧：网络→写文件=下载器形态，不再定罪）
       2. 任意源 → 外传 sink（数据流出即窃取模式）
+         （2026-11 目标感知：按目的地分层——攻击基础设施定罪，
+          包自有服务不定罪。twirp/pyslack/artifactory 误报驱动）
       3. hardcoded_payload 源 → 任意 sink（单节点敌意字面量证据）
     返回升级理由字符串；不满足返回 ''。
     在线投票层与离线重判脚本共用此函数，保证口径一致。
     """
+    _ta = None
+    if nodes:
+        try:
+            from src.target_awareness import chain_target
+            _ta = chain_target
+        except Exception:
+            _ta = None
     for c in (chains or []):
         src = c.get('source_category', '')
         sink = c.get('sink_category', '')
         if src == 'hardcoded_payload':
             return f"污点链 敌意载荷[{src}]→[{sink}]"
+
+        # 2026-11 目标感知：先问"流向了谁"——强源/外传两条规则共用
+        if _ta is not None and sink in _STRONG_SOURCE_SINKS:
+            try:
+                cls, ev = _ta(c, nodes or [], project_dir)
+                if cls == 'package_own':
+                    continue       # 流向包自己的服务：两条规则都不定罪
+                if cls == 'attacker_infra' and sink in EXFIL_SINKS:
+                    return f"污点链 [{src}]→外传[{sink}]→攻击设施[{ev[:40]}]"
+            except Exception:
+                pass
+
         if src in STRONG_SOURCES and sink in _STRONG_SOURCE_SINKS:
             return f"污点链 强源[{src}]→执行/外传[{sink}]"
         if sink in EXFIL_SINKS:
