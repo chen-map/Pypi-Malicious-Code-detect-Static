@@ -849,9 +849,31 @@ class BatchAnalyzerV20Voting:
             from zhipuai import ZhipuAI
 
             client = ZhipuAI(api_key=self.api_key)
-            blocks = _split_blocks(g['nodes'], g['edges'],
-                                   block_nodes=block_nodes,
-                                   max_blocks=max_blocks)
+            # 2026-11 函数目录选 top-N（替代按文件/函数预算切块）：
+            # 出入度 + 能力等级 + 执行时机 + 敌意字面量打分，
+            # 让 LLM 只看"最可能有链"的 N 个完整函数，而不是随机切块。
+            try:
+                from src.function_catalog import (
+                    build_catalog, select_top, expand_functions,
+                    render_catalog)
+                _cat = build_catalog(g['nodes'], g['edges'])
+                _top = select_top(_cat, n=max_blocks, min_score=2.0)
+                if _top:
+                    blocks = expand_functions(g['nodes'], g['edges'], _top)
+                    print(f"        [函数目录] {len(_cat)} 函数 → top{len(_top)} "
+                          f"(score {_top[0]['score']:.1f}…{_top[-1]['score']:.1f})")
+                    for _r in _top[:5]:
+                        print(f"          · {Path(_r['file']).name}::{_r['name']} "
+                              f"score={_r['score']} {_r['caps']}")
+                else:
+                    blocks = _split_blocks(g['nodes'], g['edges'],
+                                           block_nodes=block_nodes,
+                                           max_blocks=max_blocks)
+            except Exception as _cat_err:
+                print(f"        [WARN] 函数目录失败，回退切块: {_cat_err}")
+                blocks = _split_blocks(g['nodes'], g['edges'],
+                                       block_nodes=block_nodes,
+                                       max_blocks=max_blocks)
             import time as _time
             t0 = _time.time()
             block_results, all_paths = [], []
