@@ -24,6 +24,11 @@ SOURCE_PATTERNS = [
     (r'\.ssh/|id_rsa|\.aws/credentials|\.kube/config|\.netrc'
      r'|\.pypirc|\.docker/config\.json|\.git-credentials'
      r'|\.npmrc|\.config/gcloud', 'credentials'),
+    # 路径被 os.path.join 拆开时（真实样本写法）：
+    #   os.path.join(home, '.kube', 'config')
+    (r'\.kube[^' + chr(10) + r']{0,40}config', 'credentials'),
+    (r'\.ssh[^' + chr(10) + r']{0,40}(id_rsa|id_ed25519)', 'credentials'),
+    (r'\.aws[^' + chr(10) + r']{0,40}credentials', 'credentials'),
     (r'\bos\.environ\b', 'environment'),
     (r'\bos\.getenv\s*\(', 'environment'),
     (r'\bsys\.argv\b', 'cli_args'),
