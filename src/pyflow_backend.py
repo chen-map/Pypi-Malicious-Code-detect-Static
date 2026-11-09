@@ -150,10 +150,18 @@ def _json_or_none(txt: str):
 # ===== 三个 PyFlow 产物的解析 =====
 
 def run_capabilities(project_dir, max_seconds: int = 60,
-                     capability_model: Optional[str] = None) -> Dict:
-    """pyflow capabilities -r --format json → findings + coverage"""
+                     capability_model: Optional[str] = None,
+                     report_boundaries: bool = True) -> Dict:
+    """pyflow capabilities -r --format json → findings + coverage
+
+    report_boundaries: 加 --report-callable-boundaries，多出 escape 事件
+        (escape_kind=argument|return + boundary)，用于跨函数参数传递型链路。
+        实测代价：findings 15→18 / 71→75。
+    """
     args = ['capabilities', '-r', '--format', 'json',
             '--max-seconds', str(max_seconds)]
+    if report_boundaries:
+        args.append('--report-callable-boundaries')
     if capability_model and Path(capability_model).exists():
         args += ['--capability-model', str(capability_model)]
     args.append(str(project_dir))
@@ -320,14 +328,47 @@ def _resolve_unit_file(unit_id: str, index) -> Tuple[str, str]:
     return '', '<module>'
 
 
+
+def parse_escapes(caps: Dict) -> Dict[Tuple[str, int], Dict]:
+    """解析 escape 事件：位置 → {to: 边界, kinds: 逃逸类型, caps: 能力}。
+
+    boundary 有三种：
+        包内函数   dist_meta._utils._cache.<return>   ← 可建边
+        库函数     builtins.map / domdf_python_tools  ← 只能标注
+        泛化描述   "function return"                  ← GIR return 边已覆盖
+    """
+    out: Dict[Tuple[str, int], Dict] = {}
+    for f in (caps.get('findings') or []):
+        if (f.get('report_kind') or '') != 'indirect':
+            continue
+        loc = f.get('location') or {}
+        fpath, line = loc.get('file'), loc.get('line')
+        if not fpath or not line:
+            continue
+        key = (str(Path(fpath).resolve()), int(line))
+        rec = out.setdefault(key, {'to': set(), 'kinds': set(), 'caps': set()})
+        b = (f.get('boundary') or '').strip()
+        if b:
+            rec['to'].add(b)
+        k = (f.get('escape_kind') or '').strip()
+        if k:
+            rec['kinds'].add(k)
+        c = map_capability(f.get('capability') or '')
+        if c:
+            rec['caps'].add(c)
+    return out
+
+
 def build_nodes(gir: Dict, caps: Dict, project_dir: Path,
-                sso_result: Optional[Dict] = None) -> List[Dict]:
+                sso_result: Optional[Dict] = None,
+                escapes: Optional[Dict] = None) -> List[Dict]:
     """GIR 语句 → 我们的节点 dict（语句级，带真实行号与源码）。
 
     capability 由 capabilities findings 按 (file, line) 对齐后标注。
     """
     # capability 索引：绝对路径 + 行号 → 能力类（PyFlow ∪ 我们的 SSO）
     # 两个引擎盲区互补：PyFlow 有 IFDS/别名，SSO 有常量折叠/getattr 还原
+    escapes = escapes or parse_escapes(caps)
     from src.engine_merge import merge_capabilities, pick_capability
     cap_by_loc, module_level_by_loc = merge_capabilities(
         caps, sso_result, project_dir)
@@ -391,6 +432,8 @@ def build_nodes(gir: Dict, caps: Dict, project_dir: Path,
                 '_unit': head,
                 'module_level': _ml,
                 'phase': _phase_of(_ml, fpath, func_name),
+                'escape_to': sorted((escapes.get((fpath, line1)) or {}).get('to') or []),
+                'escape_kind': sorted((escapes.get((fpath, line1)) or {}).get('kinds') or []),
             })
     return nodes
 
@@ -424,7 +467,7 @@ def _arg_var_names(blob) -> Set[str]:
 
 
 def build_edges(gir: Dict, nodes: List[Dict], callgraph: Dict,
-                project_dir: Path) -> List[Dict]:
+                project_dir: Path, caps: Dict = None) -> List[Dict]:
     """三类边：data（GIR 值流）/ call（callgraph）/ control（语句序）"""
     by_id = {n['node_id']: n for n in nodes}
     edges: List[Dict] = []
@@ -490,6 +533,38 @@ def build_edges(gir: Dict, nodes: List[Dict], callgraph: Dict,
                 src = defs.get(r)
                 if src:
                     _add(src, nid, _EDGE_DATA, r)
+
+    # --- escape 边（2026-11）：值作为实参逃逸到包内函数 ---
+    # boundary 形如 'utils.encode' / 'dist_meta._utils._cache.<return>'，
+    # 只有能解析到**包内函数**的才建边；库函数（builtins.map）建不了，
+    # 留给节点标注（escape_to）由 digest 呈现给 LLM。
+    if caps:
+        _esc = parse_escapes(caps)
+        _fn_first = {}
+        for n in nodes:
+            fn = n.get('function_name') or '<module>'
+            _fn_first.setdefault(fn, n['node_id'])
+        for (efile, eline), rec in _esc.items():
+            if 'argument' not in rec['kinds']:
+                continue
+            try:
+                rel = str(Path(efile).relative_to(root)).replace(chr(92), '/')
+            except Exception:
+                rel = Path(efile).name
+            src_nid = f"{rel}:{eline}:0"
+            if src_nid not in by_id:
+                # 列号对不上时按 (file,line) 找第一个节点
+                cand = [nid for nid in by_id
+                        if nid.rsplit(':', 2)[0] == rel
+                        and nid.rsplit(':', 2)[1] == str(eline)]
+                if not cand:
+                    continue
+                src_nid = cand[0]
+            for b in rec['to']:
+                callee = b.split('.<')[0].rstrip('.')
+                target = _fn_first.get(callee.split('.')[-1])
+                if target and target != src_nid:
+                    _add(src_nid, target, 'param', callee.split('.')[-1])
 
     # --- 过程间边（2026-11，修"每对函数只有 1 条代表边"）---
     # GIR 的 call_stmt 带被调函数名 (name='decode')，可以在**语句级**
@@ -684,7 +759,7 @@ def analyze(project_dir, max_seconds: int = 60,
     if not nodes:
         print("          [PyFlow] 未产出任何节点")
         return None
-    edges = build_edges(gir, nodes, cg, root)
+    edges = build_edges(gir, nodes, cg, root, caps=caps)
 
     # capability 统计（我们口径）
     counts: Dict[str, int] = {}

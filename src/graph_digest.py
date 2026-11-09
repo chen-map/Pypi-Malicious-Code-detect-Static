@@ -362,8 +362,10 @@ def digest(nodes: List[Dict], edges: List[Dict],
             _fixed = _source_line(n.get('file', ''), n.get('line', 0))
             if _fixed:
                 _code = _fixed
+        _esc = n.get('escape_to') or []
+        _esc_note = (f"  <<escapes via {', '.join(_esc[:2])}>>" if _esc else '')
         lines.append(f'{real_to_short[real]}  [{_node_type(n)}]  L{n.get("line", 0)}  '
-                     f'{_shorten(_code)}{scope}{_node_tags(n, show_danger)}')
+                     f'{_shorten(_code)}{scope}{_node_tags(n, show_danger)}{_esc_note}')
 
     lines.append('')
     lines.append('## EDGES  (format: A -kind[var]-> B, [X] = cross-file)  [data flow]')
@@ -433,6 +435,26 @@ def digest(nodes: List[Dict], edges: List[Dict],
         lines.append(f'{sa[1]} ({sa[0]})  =>  {sb[1]} ({sb[0]}){var_note}  via {a}->{b}')
     if not _seen_flow:
         lines.append('(none - all data stays within a single function)')
+
+    # ===== 逃逸点（2026-11）：数据离开可见范围 =====
+    # PyFlow 的 escape 事件：值通过 return/argument 逃到边界。边建不了
+    # （边界常是库函数），但这条信息很重要——"链断了"和"链出了视野"是
+    # 两件事。LLM 据此不该把"后面没有边"当成"没问题"。
+    _esc_nodes = [n for n in ordered if n.get('escape_to')]
+    if _esc_nodes:
+        lines.append('')
+        lines.append('## ESCAPE POINTS  (values leaving the visible scope)')
+        for n in _esc_nodes[:6]:
+            real = n.get('node_id')
+            short = real_to_short.get(real)
+            if not short:
+                continue
+            kinds = ','.join(n.get('escape_kind') or [])
+            lines.append(f"  {short} L{n.get('line', 0)} "
+                         f"-> {', '.join((n.get('escape_to') or [])[:3])}"
+                         f"  [{kinds}]")
+        lines.append('  (data continues outside this block — absence of an '
+                     'edge here is NOT evidence of safety)')
 
     # ===== 跨块边（2026-11 划分越界修复）=====
     # 分块分析时块内边是诱导子图，跨函数/跨文件的边不在里面。这里单独
