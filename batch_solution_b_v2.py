@@ -3195,7 +3195,11 @@ def main():
     parser = argparse.ArgumentParser(description='批量分析包 - Solution B 投票架构')
     parser.add_argument('tarfile_dir', help='tar文件目录')
     parser.add_argument('--llm', default='glm', choices=['glm', 'claude'], help='LLM类型')
-    parser.add_argument('--api-key', required=True, help='API密钥')
+    # 密钥优先读环境变量：命令行参数会出现在 ps 的 argv 里，
+    # 共享服务器上任何登录用户都能看到（/proc/PID/environ 只有属主可读）
+    parser.add_argument('--api-key', default='',
+                        help='API密钥（留空则读环境变量 GLM_API_KEY；'
+                             '推荐用环境变量，避免密钥出现在 ps 输出里）')
     parser.add_argument('--count', type=int, default=100, help='分析包数量')
     parser.add_argument('--extract-base', default='output/packages', help='解压基目录')
     parser.add_argument('--skip-rule-scoring', action='store_true', help='跳过规则评分，直接使用LLM分析子图')
@@ -3245,10 +3249,15 @@ def main():
 
     args = parser.parse_args()
 
+    api_key = args.api_key or os.environ.get('GLM_API_KEY', '').strip()
+    if not api_key:
+        parser.error('缺少 API 密钥：传 --api-key，或设环境变量 GLM_API_KEY'
+                     '（推荐后者，--api-key 会被 ps 看到）')
+
     analyzer = BatchAnalyzerV20Voting(
         tarfile_dir=args.tarfile_dir,
         llm=args.llm,
-        api_key=args.api_key,
+        api_key=api_key,
         count=args.count,
         extract_base=args.extract_base,
         skip_rule_scoring=args.skip_rule_scoring,
