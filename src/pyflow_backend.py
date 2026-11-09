@@ -808,7 +808,7 @@ def analyze(project_dir, max_seconds: int = 60,
 
 class _Node:
     """GlobalNode 的最小替身（下游只用这些属性）"""
-    __slots__ = ('file', 'line', 'col_offset', 'type', 'source',
+    __slots__ = ('_nid', 'file', 'line', 'col_offset', 'type', 'source',
                  'function_name', 'class_name', 'resolved_call',
                  'sink_expansion', 'taint_categories', 'capability')
 
