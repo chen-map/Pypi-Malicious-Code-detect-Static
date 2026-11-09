@@ -2089,21 +2089,24 @@ Output JSON:
 
         # 攻击链重建（从DDG节点/边重建 数据引入→处理→危险执行→外传 四阶段攻击链）
         print(f"          [Step 2.4] 重建攻击链（AttackChainRebuilder）...")
+        # 2026-11 修复：整图快照必须在 try 之前建立。此前它在 AttackChainRebuilder
+        # 的 try 块里赋值——rebuild 一旦抛异常（0 条边的包很常见），
+        # self._full_graph 永远是 None，块扫描"静默关闭"，而这些恰恰是
+        # 最需要 LLM 细看的小包（tlsshield 等 5 个降级案例全部命中）。
         try:
-            ac_nodes = [
+            _ac_nodes = [
                 {
                     'node_id': n.get_id(),
                     'code': n.source or '',
                     'type': n.type or '',
                     'line': n.line,
                     'file': n.file,
-                    # 2026-11 包块划分:函数归属用于 _split_blocks 的文件→函数切分
                     'function_name': getattr(n, 'function_name', None),
                     'class_name': getattr(n, 'class_name', None),
                 }
                 for n in (result.get('nodes') or {}).values()
             ]
-            ac_edges = [
+            _ac_edges = [
                 {
                     'from_node': e.from_node.get_id(),
                     'to_node': e.to_node.get_id(),
@@ -2113,8 +2116,14 @@ Output JSON:
                 }
                 for e in (result.get('edges') or [])
             ]
-            # 整图快照留给包块划分（只在歧义区用；子进程一包一进程，内存可控）
-            self._full_graph = {'nodes': ac_nodes, 'edges': ac_edges}
+            self._full_graph = {'nodes': _ac_nodes, 'edges': _ac_edges}
+        except Exception as _fg_err:
+            print(f"          [WARN] 整图快照失败: {_fg_err}")
+            self._full_graph = None
+
+        try:
+            ac_nodes = list((self._full_graph or {}).get('nodes') or [])
+            ac_edges = list((self._full_graph or {}).get('edges') or [])
             chain_result = AttackChainRebuilder().rebuild(ac_nodes, ac_edges)
 
             # 2026-10 分层 CPG-lite ②:函数摘要落盘
