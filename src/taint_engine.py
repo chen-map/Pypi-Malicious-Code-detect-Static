@@ -52,6 +52,12 @@ HARDCODED_PAYLOAD_PATTERNS = [
     (r'bitsadmin[^\n]*/transfer', 'lolbin_download'),
     (r'/dev/tcp/\d+\.\d+\.\d+\.\d+', 'reverse_shell'),
     (r'socket\.socket\([^)]*\)[^\n]*connect\(', 'reverse_shell'),
+    # 2026-11 真实样本补三条（maxpatrol / ctf-q21 家族）
+    # ① 动态导入的远程执行：exec(__import__('requests').get(url).text)
+    (r'exec\s*\([^\n]{0,160}\.text', 'remote_exec_text'),
+    # ② 网络调用 + 裸 IP 字面量（52.246.190.141:1338）
+    (r'(requests\.(get|post|put)|urlopen|socket\.connect)[^\n]{0,140}'
+     r'\d{1,3}(\.\d{1,3}){3}', 'endpoint_literal'),
 ]
 
 
@@ -105,6 +111,9 @@ SINK_PATTERNS = [
     (r'\bos\.popen\s*\(', 'command_execution'),
     (r'\bsubprocess\.\w+\s*\(', 'command_execution'),
     (r'requests\.(post|put)\s*\(', 'data_exfiltration'),
+    # GET 也能外传（查询串带数据）。单独一类：只有目标被判定为
+    # 攻击设施时才定罪，避免正常 API 客户端误报。
+    (r'requests\.(get|head)\s*\(', 'data_exfil_get'),
     (r'\burlopen\s*\([^)]*,', 'data_exfiltration'),
     (r'socket\.(send|sendall|sendto)\s*\(', 'data_exfiltration'),
     (r'smtplib\.', 'data_exfiltration'),
@@ -183,6 +192,16 @@ def escalation_gate(chains: List[Dict], nodes: List[Dict] = None,
             return f"污点链 强源[{src}]→执行/外传[{sink}]"
         if sink in EXFIL_SINKS:
             return f"污点链 [{src}]→外传[{sink}]"
+        if sink == 'data_exfil_get':
+            # GET 外传只在目标明确是攻击设施时定罪（ctf-q21 的裸 IP 形态）
+            if _ta is not None:
+                try:
+                    cls, ev = _ta(c, nodes or [], project_dir)
+                    if cls == 'attacker_infra':
+                        return (f"污点链 [{src}]→GET外传→攻击设施[{ev[:40]}]")
+                except Exception:
+                    pass
+            continue
     return ''
 
 _MAX_CHAIN_DEPTH = 12
