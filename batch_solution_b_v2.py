@@ -266,7 +266,8 @@ class BatchAnalyzerV20Voting:
                 pyflow_max_seconds: int = 60,
                 pyflow_capability_model: str = '',
                 coverage_max_skip: float = 0.30,
-                shard_index: int = 0, shard_count: int = 1):
+                shard_index: int = 0, shard_count: int = 1,
+                use_legitimacy: bool = False):
         self.tarfile_dir = Path(tarfile_dir)
         self.llm = llm
         self.api_key = api_key
@@ -303,7 +304,14 @@ class BatchAnalyzerV20Voting:
         self.shard_index = shard_index
         self.shard_count = shard_count
         # 2026-11 合法性通道（正面证据，只能放行不能定罪）
-        self.use_legitimacy = True
+        # 2026-11-09 默认关闭：1000 包评测显示它把 15 个恶意包从 SUSPICIOUS
+        # 放行成 BENIGN，包括带 9 条链的 reverse_shell-1.2（理由竟是
+        # "destination: no resolvable network target"——解析不出目标被当成
+        # 正面证据）。保留开关仅用于消融，不许再进默认路径。
+        self.use_legitimacy = use_legitimacy
+        # 2026-11 字面量证据通道（零数据流载荷）：命中攻击基础设施字面量
+        # 时禁止 BENIGN，把包推回两阶段让强模型看（见 src/static_evidence.py）
+        self.use_static_evidence = True
         self._full_graph = None   # 当前包的整图快照（_run_ddg_builder 填充）
         self.results = []
         self.results_jsonl = None  # 增量落盘文件（analyze_all 时初始化）
@@ -342,6 +350,7 @@ class BatchAnalyzerV20Voting:
             'coverage_max_skip': self.coverage_max_skip,
             'shard_index': self.shard_index,
             'shard_count': self.shard_count,
+            'use_legitimacy': self.use_legitimacy,
         }
 
     def analyze_all(self):
@@ -662,6 +671,10 @@ class BatchAnalyzerV20Voting:
                     for c in (verdict.get('taint_chains') or [])[:3]
                 ],
                 'escalated': verdict.get('escalated', False),
+                # 2026-11 归因：这个判决是 LLM 给的还是规则给的。
+                # 之前被裁掉，导致事后无法回答"大模型到底看没看这个包"。
+                'llm_used': verdict.get('llm_used', None),
+                'risk_score': verdict.get('risk_score', None),
             }
             # 如果是恶意子图，添加关键特征
             if verdict.get('is_malicious'):
@@ -680,8 +693,29 @@ class BatchAnalyzerV20Voting:
                      or len((self._full_graph or {}).get('nodes') or [])
                      > LARGE_PKG_NODE_THRESHOLD)
         block_scan = None
+        # 2026-11-09 字面量证据通道：零数据流的硬编码载荷（ngrok C2、onion、
+        # IP:port 连接、矿池）产不出污点链，_block_gate 原本不触发，
+        # 小模型一句 BENIGN 就把包放走了（calculator_2c397c49ab20c445）。
+        # 这里只做一件事：命中强证据就不许 BENIGN，并把包推回两阶段。
+        static_ev = []
+        if self.use_static_evidence:
+            from src.static_evidence import scan as scan_static, forbid_benign
+            static_ev = scan_static((self._full_graph or {}).get('nodes') or [],
+                                    project_dir=str(package_dir))
+            if static_ev:
+                voting_result['static_evidence'] = {
+                    'count': len(static_ev),
+                    'top': static_ev[:5],
+                }
+            if static_ev and forbid_benign(static_ev):
+                if voting_result['final_category'] == 'BENIGN':
+                    voting_result['final_category'] = 'SUSPICIOUS'
+                    voting_result['static_evidence_forbade_benign'] = True
+                    print(f"        [字面量证据] {static_ev[0]['kind']} → 禁止 BENIGN")
+
         _block_gate = (voting_result['final_category'] in ('SUSPICIOUS', 'UNKNOWN')
-                       or (_is_large and not self.skip_rule_scoring))
+                       or (_is_large and not self.skip_rule_scoring)
+                       or bool(static_ev))
         if self.block_scan and _block_gate:
             if self.llm_pipeline == 'two_stage':
                 # 2026-11 两阶段接管块划分：小模型提链 → 验证 → 大模型判定
@@ -3241,6 +3275,9 @@ def main():
     parser.add_argument('--no-block-scan', action='store_true',
                         help='关闭包块划分（默认开启：投票落在 SUSPICIOUS 时'
                              '整包图按文件→函数分块逐块读，作为第二意见）')
+    parser.add_argument('--legitimacy', action='store_true',
+                        help='启用合法性通道（默认关闭：1000 包评测里它把 15 个'
+                             '恶意包放行成 BENIGN，含 9 条链的 reverse_shell）')
     parser.add_argument('--shard-index', type=int, default=0,
                         help='分片序号（0 起始）：与 --shard-count 配合，多个进程'
                              '各跑一片，并集为同一次抽样的完整 count 个包')
@@ -3277,6 +3314,7 @@ def main():
         pyflow_max_seconds=args.pyflow_max_seconds,
         pyflow_capability_model=args.pyflow_capability_model,
         coverage_max_skip=args.coverage_max_skip,
+        use_legitimacy=args.legitimacy,
         shard_index=args.shard_index,
         shard_count=args.shard_count,
     )

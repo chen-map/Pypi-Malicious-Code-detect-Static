@@ -37,8 +37,50 @@ _EXFIL_HOSTS = ('pastebin.com', 'hastebin', 'ghostbin', 'termbin',
 _MINER_RE = re.compile(r'(stratum\+?tcp|stratum\+?ssl)://|pool\.[\w-]+\.(com|net|org|io)|'
                        r'supportxmr|xmrpool|nanopool|f2pool|pool\.hashvault', re.IGNORECASE)
 _BARE_IP_RE = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d{1,5})?$')
+# 隧道/C2 前置服务（2026-11，calculator_2c397c49ab20c445 驱动：47 行反弹
+# shell，socket.connect(("4.tcp.eu.ngrok.io",19931))，整包判了 BENIGN）。
+# 这类主机是"临时公网入口"，正常软件运行时极少连它，是 C2 的标准形态。
+_C2_TUNNEL_HOSTS = ('ngrok.io', 'ngrok-free.app', 'ngrok.app', 'ngrok.dev',
+                    'ngrok-free.dev', 'localtunnel.me', 'loca.lt', 'serveo.net',
+                    'trycloudflare.com', 'bore.pub', 'localhost.run',
+                    'pagekite.me', 'telebit.io', 'pinggy.io', 'tunnelto.dev')
+# Tor 隐藏服务——合法软件几乎不直连
+_ONION_RE = re.compile(r'\b[a-z2-7]{16}\.onion\b', re.IGNORECASE)
+# 连接/外发语句（判断字面量是否真的落在连接点上，而非文档字符串）
+_CONNECT_RE = re.compile(r'\b(connect|connect_ex|create_connection|urlopen|'
+                         r'requests\.(post|get|put)|session\.(post|get|put)|'
+                         r'urllib\.request|http\.client|os\.system|Popen|call|run)\s*\(')
+# 连接形态的 IP:port：connect(("1.2.3.4", 4444))
+_IP_PORT_RE = re.compile(r'[\'"](\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})[\'"]\s*,\s*(\d{2,5})')
 # 疑似恶意 TLD（廉价/匿名注册，常见于一次性 C2）
 _SUSPECT_TLD = ('.tk', '.top', '.xyz', '.click', '.link', '.gq', '.cf', '.ml')
+
+
+def hostile_literal_in(code: str) -> Optional[str]:
+    """一条语句里是否含攻击者基础设施字面量？命中返回类型名。
+
+    与 classify_target 的分工：classify_target 判"流出的目标属于谁"，
+    这里判"这段代码本身是不是在连攻击基础设施"。零数据流的硬编码 C2
+    （socket.connect(("x.ngrok.io", 19931))）没有 source 也没有链，
+    只能靠字面量本身作证——这是字面量证据通道的入口。
+    """
+    if not code:
+        return None
+    low = code.lower()
+    if _ONION_RE.search(low):
+        return 'onion'
+    for h in _C2_TUNNEL_HOSTS:
+        if h in low:
+            return 'c2_tunnel'
+    if _MINER_RE.search(low):
+        return 'miner'
+    if _CONNECT_RE.search(low):
+        for h in _OAST_DOMAINS + _EXFIL_HOSTS:
+            if h in low:
+                return 'exfil_endpoint'
+        if _IP_PORT_RE.search(code):
+            return 'ip_port'
+    return None
 
 
 def classify_target(target: str) -> str:

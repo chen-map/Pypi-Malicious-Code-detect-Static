@@ -48,11 +48,16 @@ def any_hostile_literal(paths: List[Dict], nodes: List[Dict]) -> bool:
     by_id = {n.get('node_id'): (n.get('code') or '')
              for n in nodes if n.get('node_id')}
     from src.literal_decoder import scan_code, decoded_has_risk
+    from src.target_awareness import hostile_literal_in
     for p in paths or []:
         for nid in p.get('nodes') or []:
             raw = by_id.get(nid) or ''
             code = raw.lower()
             if any(t in code for t in _LITERAL_RISK):
+                return True
+            # 2026-11-09 隧道/C2 字面量（ngrok/onion/IP:port 连接）：
+            # 这类载荷没有数据流，字面量本身即证据
+            if hostile_literal_in(raw):
                 return True
             # 2026-11 混淆补偿：载荷藏在编码字面量里时，解一层再判
             for hit in scan_code(raw):

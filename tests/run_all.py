@@ -28,6 +28,7 @@ TESTS = [
     'test_legitimacy.py',
     'test_artifact_scanner.py',
     'test_shard.py',
+    'test_static_evidence.py',
 ]
 
 

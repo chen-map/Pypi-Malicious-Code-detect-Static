@@ -46,9 +46,12 @@ _SINK_HINT = re.compile(
     r'marshal\.loads|b64decode|ctypes|chmod|setuid)\b', re.IGNORECASE)
 
 # 敌意字面量（有解码载荷时也算）
+# 2026-11-09 补隧道/C2 主机：ngrok 这类载荷没有数据流，字面量是唯一线索，
+# 必须让含它的函数进入 top-N，否则强模型根本看不到这个包
 _HOSTILE_HINT = re.compile(
     r'(/dev/tcp|encodedcommand|supportxmr|stratum|oastify|pastebin|'
-    r'webhook\.site|\.onion|wallet)', re.IGNORECASE)
+    r'webhook\.site|\.onion|wallet|ngrok|localtunnel|serveo\.net|'
+    r'trycloudflare|bore\.pub)', re.IGNORECASE)
 
 
 def _fn_key(n: Dict) -> Tuple[str, str]:
