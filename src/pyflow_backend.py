@@ -222,6 +222,7 @@ def _stmt_of(stmt: Dict) -> Dict:
         'receiver': stmt.get('receiver_object') or '',
         'field': stmt.get('field') or '',
         'args': stmt.get('positional_args') or '',
+        'callee': stmt.get('name') or '',
         'named': stmt.get('named_args') or '',
         'stmt_id': stmt.get('stmt_id'),
         'parent': stmt.get('parent_stmt_id'),
@@ -455,7 +456,65 @@ def build_edges(gir: Dict, nodes: List[Dict], callgraph: Dict,
                     if src:
                         _add(src, nid, _EDGE_DATA, r)
 
-    # --- call：callgraph 函数级 → 函数首节点的代表边 ---
+    # --- 过程间边（2026-11，修"每对函数只有 1 条代表边"）---
+    # GIR 的 call_stmt 带被调函数名 (name='decode')，可以在**语句级**
+    # 建两条跨函数边：
+    #   调用语句 → 被调函数首语句   (kind=call)
+    #   被调函数 return 语句 → 调用语句 (kind=return)
+    # 这样 source.py 的 return 才能连到 transform.py 的 b64decode 参数，
+    # 再连到 main.py 的 os.system——真实的跨文件链。
+    fn_entries: Dict[str, List[str]] = {}
+    fn_returns: Dict[str, List[str]] = {}
+    for unit, stmts in _gir_units(gir):
+        for raw in stmts:
+            s = _stmt_of(raw)
+            if s['row'] is None:
+                continue
+            fpath = raw.get('file') or ''
+            if fpath:
+                fpath = str(Path(fpath).resolve())
+            else:
+                fpath, _fn = _resolve_unit_file(raw.get('unit_id') or '', file_index)
+            if not fpath:
+                continue
+            try:
+                rel = str(Path(fpath).relative_to(root)).replace(chr(92), '/')
+            except Exception:
+                rel = Path(fpath).name
+            nid = f"{rel}:{int(s['row']) + 1}:{s['col']}"
+            if nid not in by_id:
+                continue
+            fname = by_id[nid].get('function_name') or '<module>'
+            fn_entries.setdefault(fname, []).append(nid)
+            if 'return' in (s['op'] or '').lower():
+                fn_returns.setdefault(fname, []).append(nid)
+
+    for unit, stmts in _gir_units(gir):
+        for raw in stmts:
+            s = _stmt_of(raw)
+            if s['row'] is None or not s.get('callee'):
+                continue
+            fpath = raw.get('file') or ''
+            if fpath:
+                fpath = str(Path(fpath).resolve())
+            else:
+                fpath, _fn = _resolve_unit_file(raw.get('unit_id') or '', file_index)
+            if not fpath:
+                continue
+            try:
+                rel = str(Path(fpath).relative_to(root)).replace(chr(92), '/')
+            except Exception:
+                rel = Path(fpath).name
+            call_nid = f"{rel}:{int(s['row']) + 1}:{s['col']}"
+            if call_nid not in by_id:
+                continue
+            callee = s['callee'].split('.')[-1]
+            for entry in (fn_entries.get(callee) or [])[:1]:
+                _add(call_nid, entry, _EDGE_CALL, callee)
+            for ret in (fn_returns.get(callee) or [])[:3]:
+                _add(ret, call_nid, 'return', callee)
+
+    # --- call：callgraph 函数级 → 函数首节点的代表边（补充）---
     # 2026-11 修正（实测 dist_meta：PyFlow 给出 145 条调用/110 条跨模块，
     # 我们此前只接住 19/3 条）。原因是 callgraph 用**全限定名**
     # (dist_meta._utils._parse_version)，而 GIR 的 unit 键是**裸名**
