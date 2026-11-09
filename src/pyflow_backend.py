@@ -403,9 +403,8 @@ def build_edges(gir: Dict, nodes: List[Dict], callgraph: Dict,
     if graph:
         func_first: Dict[str, str] = {}
         for n in nodes:
-            fq = f"{n['_unit']}" if n['function_name'] != '<module>' else n['_unit']
-            func_first.setdefault(n['_unit'], n['node_id'])
-            func_first.setdefault(fq, n['node_id'])
+            unit = n.get('_unit') or n.get('function_name') or '<module>'
+            func_first.setdefault(unit, n['node_id'])
         for caller, callees in graph.items():
             src = func_first.get(caller)
             if not src:
