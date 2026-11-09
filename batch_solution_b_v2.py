@@ -8,6 +8,7 @@ batch_v20_complete_voting.py - Solution B 投票架构实现
 """
 
 import json
+import os
 import re
 import sys
 import time
@@ -239,6 +240,20 @@ def _llm_malicious_weak_only(llm_malicious, enhanced_detection_result):
     return weak if len(weak) == len(llm_malicious) else []
 
 
+def shard_partition(items, index, count):
+    """把同一次抽样切成 count 份互斥子集，取第 index 份。
+
+    抽样在切片之前完成，所以各片并集 = 完整样本（不重不漏）。
+    包是串行处理的，单进程在 32 核机器上只用 1 核、全在等 LLM 往返，
+    分片是让一次评测真正吃满机器的唯一办法。
+    """
+    if count <= 1:
+        return list(items)
+    if not 0 <= index < count:
+        raise ValueError(f"shard_index 必须在 [0,{count}) 内，收到 {index}")
+    return list(items)[index::count]
+
+
 class BatchAnalyzerV20Voting:
     """批量分析器 V20 - 投票架构"""
 
@@ -250,7 +265,8 @@ class BatchAnalyzerV20Voting:
                 llm_model_small: str = '', llm_model_big: str = '',
                 pyflow_max_seconds: int = 60,
                 pyflow_capability_model: str = '',
-                coverage_max_skip: float = 0.30):
+                coverage_max_skip: float = 0.30,
+                shard_index: int = 0, shard_count: int = 1):
         self.tarfile_dir = Path(tarfile_dir)
         self.llm = llm
         self.api_key = api_key
@@ -280,6 +296,12 @@ class BatchAnalyzerV20Voting:
         self.pyflow_max_seconds = pyflow_max_seconds
         self.pyflow_capability_model = pyflow_capability_model
         self.coverage_max_skip = coverage_max_skip
+        # 2026-11 分片（--shard-index/--shard-count）：把同一次抽样的 count 个包
+        # 切成 count 份互斥子集，多个进程各跑一片。抽样在切片之前完成，
+        # 所以各片并集 = 完整样本，不会重复也不会漏（包是串行处理的，
+        # 单进程时 32 核机器只用到 1 核，全在等 LLM 往返）。
+        self.shard_index = shard_index
+        self.shard_count = shard_count
         # 2026-11 合法性通道（正面证据，只能放行不能定罪）
         self.use_legitimacy = True
         self._full_graph = None   # 当前包的整图快照（_run_ddg_builder 填充）
@@ -318,6 +340,8 @@ class BatchAnalyzerV20Voting:
             'pyflow_max_seconds': self.pyflow_max_seconds,
             'pyflow_capability_model': self.pyflow_capability_model,
             'coverage_max_skip': self.coverage_max_skip,
+            'shard_index': self.shard_index,
+            'shard_count': self.shard_count,
         }
 
     def analyze_all(self):
@@ -353,11 +377,18 @@ class BatchAnalyzerV20Voting:
             inputs = all_inputs
             print(f"分析全部 {len(inputs)} 个输入")
 
+        # 分片：抽样之后切，保证各片互斥且并集完整
+        if self.shard_count > 1:
+            inputs = shard_partition(inputs, self.shard_index, self.shard_count)
+            print(f"[分片] {self.shard_index + 1}/{self.shard_count} → {len(inputs)} 个包")
+
         # 增量落盘：每包一行 JSONL，批次结束再写汇总 JSON——
         # 原先结果只在最后一次性写出，中途崩溃全部丢失
         results_dir = Path('output/results')
         results_dir.mkdir(parents=True, exist_ok=True)
-        self.results_jsonl = results_dir / f'batch_v20_voting_results_{int(time.time())}.jsonl'
+        # 文件名带 pid：多分片并行时同秒启动也不会互相覆盖/交错
+        self.results_jsonl = results_dir / (
+            f'batch_v20_voting_results_{int(time.time())}_{os.getpid()}.jsonl')
         print(f"[输出目录] 增量结果: {self.results_jsonl}")
 
         for idx, (input_path, input_type) in enumerate(inputs, 1):
@@ -3123,7 +3154,8 @@ Output JSON:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # 保存汇总结果到 output/results/
-        output_file = output_dir / f'batch_v20_voting_results_{int(time.time())}.json'
+        output_file = output_dir / (
+            f'batch_v20_voting_results_{int(time.time())}_{os.getpid()}.json')
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(self.results, f, indent=2, ensure_ascii=False, default=str)
         print(f"\n结果已保存到: {output_file}")
@@ -3205,6 +3237,11 @@ def main():
     parser.add_argument('--no-block-scan', action='store_true',
                         help='关闭包块划分（默认开启：投票落在 SUSPICIOUS 时'
                              '整包图按文件→函数分块逐块读，作为第二意见）')
+    parser.add_argument('--shard-index', type=int, default=0,
+                        help='分片序号（0 起始）：与 --shard-count 配合，多个进程'
+                             '各跑一片，并集为同一次抽样的完整 count 个包')
+    parser.add_argument('--shard-count', type=int, default=1,
+                        help='分片总数（默认 1 = 不分片）')
 
     args = parser.parse_args()
 
@@ -3231,6 +3268,8 @@ def main():
         pyflow_max_seconds=args.pyflow_max_seconds,
         pyflow_capability_model=args.pyflow_capability_model,
         coverage_max_skip=args.coverage_max_skip,
+        shard_index=args.shard_index,
+        shard_count=args.shard_count,
     )
 
     analyzer.analyze_all()

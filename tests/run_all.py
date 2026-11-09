@@ -27,6 +27,7 @@ TESTS = [
     'test_engine_merge.py',
     'test_legitimacy.py',
     'test_artifact_scanner.py',
+    'test_shard.py',
 ]
 
 
