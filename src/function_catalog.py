@@ -288,14 +288,15 @@ def build_function_graph(nodes: List[Dict],
 
 def select_clusters(catalog: List[Dict], fn_adj: Dict, top_n: int = 8,
                     expand_hops: int = 2, max_funcs_per_cluster: int = 6,
-                    max_nodes_per_cluster: int = 900) -> List[List[Dict]]:
+                    max_nodes_per_cluster: int = 900,
+                    seed_override: Optional[List[Dict]] = None) -> List[List[Dict]]:
     """按簇交付：种子函数 + 调用闭包（解决 A→B 拆分攻击）。
 
     Returns:
         [[catalog_record, ...], ...] 每个簇一组函数
     """
     by_key = {tuple(r['key']): r for r in catalog}
-    seeds = select_top(catalog, n=top_n, min_score=2.0)
+    seeds = list(seed_override) if seed_override else         select_top(catalog, n=top_n, min_score=2.0)
     if not seeds:
         return []
 
@@ -320,6 +321,19 @@ def select_clusters(catalog: List[Dict], fn_adj: Dict, top_n: int = 8,
             frontier = nxt
             if not frontier:
                 break
+
+        # 2026-11 链完整性：把簇内成员之间的**中间函数**补进来。
+        # 成员 A 和 C 若在函数图上相距 2-3 跳，中间的 B 往往就是"共犯
+        # 之间的桥"（读凭据的函数 → 编码函数 → 发送函数）。只补连接
+        # 成员的最短路径上的节点，避免把整个连通分量拖进来。
+        if len(comp) > 1:
+            for _a in list(comp):
+                for _b in list(comp):
+                    if _a == _b:
+                        continue
+                    path = _shortest_fn_path(_a, _b, fn_adj, by_key, max_len=4)
+                    if path:
+                        comp.update(path)
 
         # 按分数排序，控制簇规模（种子必留）
         members = sorted(comp, key=lambda k: (k != sk, -by_key[k]['score']))
@@ -394,4 +408,121 @@ def expand_clusters(nodes: List[Dict], edges: List[Dict],
             'cluster_score': sum(r['score'] for r in members),
             'meta': members[0],
         })
+    return out
+
+
+
+def _shortest_fn_path(a, b, adj, by_key, max_len: int = 4):
+    """函数图上的最短路径（限长），返回中间节点（不含端点）。"""
+    from collections import deque as _dq
+    if a not in adj or b not in adj:
+        return None
+    prev = {a: None}
+    q = _dq([a])
+    while q:
+        cur = q.popleft()
+        if cur == b:
+            break
+        depth = 0
+        x = cur
+        while prev.get(x) is not None:
+            depth += 1
+            x = prev[x]
+        if depth >= max_len:
+            continue
+        for nb in adj.get(cur, ()):
+            if nb in prev or nb not in by_key:
+                continue
+            prev[nb] = cur
+            q.append(nb)
+    if b not in prev:
+        return None
+    path, cur = [], prev[b]
+    while cur is not None and cur != a:
+        path.append(cur)
+        cur = prev[cur]
+    return path or None
+
+
+# ===== LLM 二次划分（2026-11）=====
+# 程序打分只看得到"能力/度/时机"，看不到语义。小模型读目录后常见的补充是：
+#   "这两个函数都无能力但互相调用，且一个读文件一个发网络 —— 一起看"
+# 所以：程序给初选，LLM 可以追加最多 k 个函数，两者取并集。
+
+SELECT_PROMPT = """You are triaging a Python package for malicious behavior.
+Below is a catalog of its functions. Each line:
+  <file>::<function> L<lines> <stmt> [capabilities] in<deg>/out<deg> <phase> score=<n>
+
+Your job: choose up to {max_extra} ADDITIONAL functions worth reading closely,
+beyond the {n_preselected} already preselected. Pick functions that could form
+an attack chain TOGETHER with the preselected ones, especially:
+  - one reads credentials/files while another sends network traffic
+  - one decodes/decrypts while another executes
+  - functions called by, or calling, the preselected ones
+Do NOT pick pure utility/math/string helpers.
+
+## Preselected
+{preselected}
+
+## Catalog
+{catalog}
+
+Reply with JSON only:
+{{"extra": ["file.py::func", ...], "why": "one short sentence"}}
+If nothing else is worth reading, return {{"extra": [], "why": "..."}}.
+"""
+
+
+def render_selection_view(catalog: List[Dict], picked: List[Dict],
+                          max_chars: int = 4500) -> str:
+    """给"二次划分"用的紧凑视图：预设项 + 未选中的候选"""
+    picked_keys = {tuple(r['key']) for r in picked}
+    lines = []
+    for r in picked:
+        lines.append(f"{Path(r['file']).name}::{r['name']} L{r['lines'][0]}-"
+                     f"{r['lines'][1]} {r['n_stmt']}stmt [{','.join(r['caps']) or '-'}] "
+                     f"in{r['in']}/out{r['out']} {r['phase']} score={r['score']}")
+    rest = [r for r in catalog if tuple(r['key']) not in picked_keys]
+    # 优先展示：有能力 / 有连接度 / 非 fixture
+    rest.sort(key=lambda r: (bool(r['caps']), r['in'] + r['out'], r['n_stmt']),
+              reverse=True)
+    for r in rest[:60]:
+        lines.append(f"{Path(r['file']).name}::{r['name']} L{r['lines'][0]}-"
+                     f"{r['lines'][1]} {r['n_stmt']}stmt [{','.join(r['caps']) or '-'}] "
+                     f"in{r['in']}/out{r['out']} {r['phase']} score={r['score']}")
+    text = '\n'.join(lines)
+    return text[:max_chars]
+
+
+def parse_selection(text: str) -> List[str]:
+    """解析小模型返回的 {"extra": ["file.py::func", ...]}"""
+    import json as _json
+    import re as _re
+    if not text:
+        return []
+    m = _re.search(r'\{.*\}', text, _re.DOTALL)
+    raw = m.group(0) if m else text
+    try:
+        data = _json.loads(raw)
+    except Exception:
+        return []
+    out = []
+    for item in (data.get('extra') or []):
+        if isinstance(item, str) and '::' in item:
+            out.append(item.strip())
+    return out
+
+
+def resolve_selection(catalog: List[Dict], refs: List[str]) -> List[Dict]:
+    """把 "file.py::func" 解析回目录记录（按文件名+函数名匹配）"""
+    by_pair = {}
+    for r in catalog:
+        by_pair[(Path(r['file']).name, r['name'])] = r
+    out = []
+    for ref in refs:
+        f, _, fn = ref.partition('::')
+        f = f.strip().split('/')[-1]
+        r = by_pair.get((f, fn.strip()))
+        if r:
+            out.append(r)
     return out

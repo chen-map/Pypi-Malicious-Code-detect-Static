@@ -860,8 +860,39 @@ class BatchAnalyzerV20Voting:
                 # 2026-11 按簇交付（解决 A→B 拆分攻击）：种子函数 +
                 # 函数图上的调用闭包，一起给 LLM，避免"各自清白"。
                 _fadj = build_function_graph(g['nodes'], g['edges'])
+                _seeds = select_top(_cat, n=max_blocks, min_score=2.0)
+                # 2026-11 二次划分：小模型读目录，可追加它认为值得看的函数
+                # （程序只看得到能力和度数，看不到"这两个合起来像攻击"）
+                try:
+                    from src.function_catalog import (
+                        render_selection_view, SELECT_PROMPT,
+                        parse_selection, resolve_selection)
+                    _view = render_selection_view(_cat, _seeds)
+                    _msg = SELECT_PROMPT.format(
+                        max_extra=max(2, max_blocks // 3),
+                        n_preselected=len(_seeds),
+                        preselected=render_selection_view(_cat, _seeds, 1200)
+                        .split(chr(10))[0] if _seeds else '',
+                        catalog=_view)
+                    _resp = client.chat.completions.create(
+                        model=self.llm_model_small,
+                        messages=[{"role": "user", "content": _msg}],
+                        temperature=0.0, max_tokens=400)
+                    _txt = (_resp.choices[0].message.content
+                            if _resp.choices else '') or ''
+                    _extra = resolve_selection(_cat, parse_selection(_txt))
+                    if _extra:
+                        seen = {tuple(r['key']) for r in _seeds}
+                        _seeds = _seeds + [r for r in _extra
+                                           if tuple(r['key']) not in seen]
+                        print(f"        [二次划分] LLM 追加 {len(_extra)} 个函数: "
+                              + ', '.join(f"{Path(r['file']).name}::{r['name']}"
+                                          for r in _extra[:4]))
+                except Exception as _sel_err:
+                    print(f"        [二次划分] 跳过: {_sel_err}")
                 _clusters = select_clusters(
-                    _cat, _fadj, top_n=max_blocks, expand_hops=2)
+                    _cat, _fadj, top_n=len(_seeds) or max_blocks,
+                    expand_hops=2, seed_override=_seeds)
                 if _clusters:
                     blocks = expand_clusters(g['nodes'], g['edges'], _clusters)
                     print(f"        [函数簇] {len(_cat)} 函数 → "
