@@ -98,6 +98,7 @@ _EDGE_CONTROL = 'control'
 
 # 这些 GIR operation 产生"值"（有 target），可作为数据边源头
 _PVAR_RE = re.compile(r'%([A-Za-z_][A-Za-z0-9_]*)')
+_VAR_NAME_RE = re.compile(r'%?[A-Za-z_]\w*')
 
 _VALUE_OPS = {
     'call_stmt', 'object_call_stmt', 'new_array', 'assign', 'array_write',
@@ -394,6 +395,34 @@ def build_nodes(gir: Dict, caps: Dict, project_dir: Path,
     return nodes
 
 
+def _arg_var_names(blob) -> Set[str]:
+    """从 GIR 的 positional_args/named_args 里解析变量名。
+
+    GIR 的实参是 Python 列表的 repr，元素有两种：
+        '%vv2'      → 临时变量（去 % 后比对）
+        'data'      → 用户变量（裸名）
+        "'AWS_SECRET'" → 字符串字面量（不是变量）
+    早期只认 % 前缀，导致 `data = decode(); os.system(data)` 这种最
+    常见的形态断链。
+    """
+    out: Set[str] = set()
+    s = str(blob or '').strip()
+    if not s:
+        return out
+    try:
+        vals = ast.literal_eval(s)
+        if isinstance(vals, (list, tuple)):
+            for v in vals:
+                if isinstance(v, str) and _VAR_NAME_RE.fullmatch(v):
+                    out.add(v.lstrip('%'))
+            return out
+    except Exception:
+        pass
+    for m in _PVAR_RE.finditer(s):
+        out.add(m.group(1))
+    return out
+
+
 def build_edges(gir: Dict, nodes: List[Dict], callgraph: Dict,
                 project_dir: Path) -> List[Dict]:
     """三类边：data（GIR 值流）/ call（callgraph）/ control（语句序）"""
@@ -450,11 +479,16 @@ def build_edges(gir: Dict, nodes: List[Dict], callgraph: Dict,
             tgt = s['target']
             if tgt and tgt.startswith('%'):
                 defs.setdefault(tgt.strip('[](),').lstrip('%'), nid)
-            for blob in (s['args'], s['named'], s['receiver']):
-                for r in _PVAR_RE.findall(str(blob or '')):
+            for blob in (s['args'], s['named']):
+                for r in _arg_var_names(blob):
                     src = defs.get(r)
                     if src:
                         _add(src, nid, _EDGE_DATA, r)
+            # receiver 形如 '%vv2'（对象变量）
+            for r in _PVAR_RE.findall(str(s.get('receiver') or '')):
+                src = defs.get(r)
+                if src:
+                    _add(src, nid, _EDGE_DATA, r)
 
     # --- 过程间边（2026-11，修"每对函数只有 1 条代表边"）---
     # GIR 的 call_stmt 带被调函数名 (name='decode')，可以在**语句级**
