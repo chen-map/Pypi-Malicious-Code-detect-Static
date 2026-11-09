@@ -256,3 +256,104 @@ def render_catalog(catalog: List[Dict], top_n: int = 12,
     if len(text) > max_chars:
         text = text[:max_chars] + '\n... (catalog truncated)'
     return text
+
+
+# ===== 簇选择（2026-11，拆分攻击驱动）=====
+# 单函数交付会把"共犯"拆散：
+#     A: data = read_credentials()      ← 单看：正常读配置
+#     B: post(data)                    ← 单看：正常 HTTP 客户端
+#     合起来：凭据外传
+# 所以交付单位必须是**簇**：种子函数 + 它在函数图上的邻居（调用闭包）。
+
+def build_function_graph(nodes: List[Dict],
+                         edges: List[Dict]) -> Dict[Tuple[str, str], Set[Tuple[str, str]]]:
+    """函数级无向邻接表（跨文件）。
+
+    只用数据/调用/返回边——控制边会让同文件的函数全部连成一团。
+    """
+    fn_of = {n['node_id']: _fn_key(n) for n in nodes if n.get('node_id')}
+    adj: Dict[Tuple[str, str], Set[Tuple[str, str]]] = defaultdict(set)
+    for e in edges:
+        kind = e.get('kind') or 'data'
+        if kind not in ('data', 'param', 'return', 'call'):
+            continue
+        a = fn_of.get(e.get('from_node'))
+        b = fn_of.get(e.get('to_node'))
+        if not a or not b or a == b:
+            continue
+        adj[a].add(b)
+        adj[b].add(a)
+    return adj
+
+
+def select_clusters(catalog: List[Dict], fn_adj: Dict, top_n: int = 8,
+                    expand_hops: int = 2, max_funcs_per_cluster: int = 6,
+                    max_nodes_per_cluster: int = 900) -> List[List[Dict]]:
+    """按簇交付：种子函数 + 调用闭包（解决 A→B 拆分攻击）。
+
+    Returns:
+        [[catalog_record, ...], ...] 每个簇一组函数
+    """
+    by_key = {tuple(r['key']): r for r in catalog}
+    seeds = select_top(catalog, n=top_n, min_score=2.0)
+    if not seeds:
+        return []
+
+    covered: Set[Tuple[str, str]] = set()
+    clusters: List[List[Dict]] = []
+
+    for seed in seeds:
+        sk = tuple(seed['key'])
+        if sk in covered:
+            continue
+        # BFS 展开（函数图上的 k 跳）
+        comp = {sk}
+        frontier = [sk]
+        for _ in range(max(0, expand_hops)):
+            nxt = []
+            for k in frontier:
+                for nb in fn_adj.get(k, ()):
+                    if nb in comp or nb not in by_key:
+                        continue
+                    comp.add(nb)
+                    nxt.append(nb)
+            frontier = nxt
+            if not frontier:
+                break
+
+        # 按分数排序，控制簇规模（种子必留）
+        members = sorted(comp, key=lambda k: (k != sk, -by_key[k]['score']))
+        kept: List[Tuple[str, str]] = []
+        total_nodes = 0
+        for k in members:
+            r = by_key[k]
+            if len(kept) >= max_funcs_per_cluster:
+                break
+            if kept and total_nodes + r['n_stmt'] > max_nodes_per_cluster:
+                continue
+            kept.append(k)
+            total_nodes += r['n_stmt']
+        covered |= set(kept)
+        clusters.append([by_key[k] for k in kept])
+    return clusters
+
+
+def expand_clusters(nodes: List[Dict], edges: List[Dict],
+                    clusters: List[List[Dict]]) -> List[Dict]:
+    """把每个簇展开成一个块（簇内所有函数的全部语句 + 簇内边 + 边界边）。"""
+    out = []
+    for ci, members in enumerate(clusters, 1):
+        fn_keys = [tuple(r['key']) for r in members]
+        names = ', '.join(f"{Path(r['file']).name}::{r['name']}"
+                          for r in members[:3])
+        if len(members) > 3:
+            names += f" +{len(members)-3}"
+        # 复用 expand_functions（单簇调用）
+        blk = expand_functions(nodes, edges, members)[0] if members else None
+        if not blk:
+            continue
+        blk['label'] = f"cluster{ci}: {names}"
+        blk['cluster'] = fn_keys
+        blk['cluster_score'] = sum(r['score'] for r in members)
+        out.append(blk)
+    return out

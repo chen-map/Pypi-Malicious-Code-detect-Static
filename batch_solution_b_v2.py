@@ -855,16 +855,25 @@ class BatchAnalyzerV20Voting:
             try:
                 from src.function_catalog import (
                     build_catalog, select_top, expand_functions,
-                    render_catalog)
+                    build_function_graph, select_clusters, expand_clusters)
                 _cat = build_catalog(g['nodes'], g['edges'])
-                _top = select_top(_cat, n=max_blocks, min_score=2.0)
-                if _top:
+                # 2026-11 按簇交付（解决 A→B 拆分攻击）：种子函数 +
+                # 函数图上的调用闭包，一起给 LLM，避免"各自清白"。
+                _fadj = build_function_graph(g['nodes'], g['edges'])
+                _clusters = select_clusters(
+                    _cat, _fadj, top_n=max_blocks, expand_hops=2)
+                if _clusters:
+                    blocks = expand_clusters(g['nodes'], g['edges'], _clusters)
+                    print(f"        [函数簇] {len(_cat)} 函数 → "
+                          f"{len(_clusters)} 簇 / "
+                          f"{sum(len(c) for c in _clusters)} 函数")
+                    for _b in blocks[:5]:
+                        print(f"          · {_b['label']} "
+                              f"({len(_b['nodes'])} stmt)")
+                elif _cat:
+                    _top = select_top(_cat, n=max_blocks, min_score=2.0)
                     blocks = expand_functions(g['nodes'], g['edges'], _top)
-                    print(f"        [函数目录] {len(_cat)} 函数 → top{len(_top)} "
-                          f"(score {_top[0]['score']:.1f}…{_top[-1]['score']:.1f})")
-                    for _r in _top[:5]:
-                        print(f"          · {Path(_r['file']).name}::{_r['name']} "
-                              f"score={_r['score']} {_r['caps']}")
+                    print(f"        [函数目录] 回退单函数 top{len(_top)}")
                 else:
                     blocks = _split_blocks(g['nodes'], g['edges'],
                                            block_nodes=block_nodes,
