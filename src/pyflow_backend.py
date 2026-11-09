@@ -448,20 +448,56 @@ def build_edges(gir: Dict, nodes: List[Dict], callgraph: Dict,
                         _add(src, nid, _EDGE_DATA, r)
 
     # --- call：callgraph 函数级 → 函数首节点的代表边 ---
+    # 2026-11 修正（实测 dist_meta：PyFlow 给出 145 条调用/110 条跨模块，
+    # 我们此前只接住 19/3 条）。原因是 callgraph 用**全限定名**
+    # (dist_meta._utils._parse_version)，而 GIR 的 unit 键是**裸名**
+    # (_parse_version)，直接查表必然落空。
+    # 修法：用每个节点的 (模块点分名, 函数名) 建多键索引。
     graph = (callgraph or {}).get('graph') or {}
     if graph:
-        func_first: Dict[str, str] = {}
+        first_of: Dict[str, str] = {}
         for n in nodes:
-            unit = n.get('_unit') or n.get('function_name') or '<module>'
-            func_first.setdefault(unit, n['node_id'])
+            nid = n['node_id']
+            fpath = n.get('file') or ''
+            fname = n.get('function_name') or '<module>'
+            try:
+                rel = Path(fpath).relative_to(root).with_suffix('')
+                mod = str(rel).replace(chr(92), '/').replace('/', '.')
+                if mod.endswith('.__init__'):
+                    mod = mod[:-len('.__init__')]
+            except Exception:
+                mod = ''
+            # 全限定名优先（最精确）
+            if mod and fname != '<module>':
+                first_of.setdefault(f'{mod}.{fname}', nid)
+            # 模块级
+            if fname == '<module>' and mod:
+                first_of.setdefault(mod, nid)
+            first_of.setdefault(fname, nid)          # 裸名兜底
+
+        def _lookup(name: str):
+            if name in first_of:
+                return first_of[name]
+            # 去掉包前缀再试（dist_meta._utils.f -> _utils.f）
+            parts = name.split('.')
+            for i in range(1, len(parts)):
+                cand = '.'.join(parts[i:])
+                if cand in first_of:
+                    return first_of[cand]
+            return None
+
+        matched = 0
         for caller, callees in graph.items():
-            src = func_first.get(caller)
+            src = _lookup(caller)
             if not src:
                 continue
             for callee in (callees or [])[:20]:
-                dst = func_first.get(callee)
+                dst = _lookup(callee)
                 if dst:
                     _add(src, dst, _EDGE_CALL, callee.rsplit('.', 1)[-1])
+                    matched += 1
+        if matched:
+            print(f"          [PyFlow] 调用边接入 {matched} 条")
     return edges
 
 
