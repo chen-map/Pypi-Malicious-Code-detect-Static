@@ -470,7 +470,33 @@ def analyze(project_dir, max_seconds: int = 60,
         print(f"          [SSO] {n_sso} 个能力命中（与 PyFlow 合并）")
     nodes = build_nodes(gir, caps, root, sso_result=sso)
     if not nodes:
-        print("          [PyFlow] 未产出语句节点（GIR 为空）")
+        # GIR 为空（单文件目录/结构异常）时，用能力命中点合成节点。
+        # 能力命中本身带着 file:line，足以支撑下游的 digest 与判定；
+        # 只是没有语句间边（链验证会退化为单节点证据）。
+        from src.engine_merge import merge_capabilities, pick_capability
+        cap_by_loc, ml_by_loc = merge_capabilities(caps, sso, root)
+        for (fpath, line), capset in sorted(cap_by_loc.items()):
+            cap = pick_capability(capset)
+            if not cap:
+                continue
+            try:
+                rel = str(Path(fpath).relative_to(root)).replace(chr(92), '/')
+            except Exception:
+                rel = Path(fpath).name
+            nodes.append({
+                'node_id': f"{rel}:{line}:0",
+                'file': fpath, 'line': line, 'type': 'stmt',
+                'code': _source_line(fpath, line) or cap,
+                'function_name': '<module>', 'class_name': None,
+                'capability': cap, 'is_dangerous': CAPABILITY_TIER.get(cap, 9) == 1,
+                'severity': severity_for(cap),
+                'module_level': ml_by_loc.get((fpath, line)),
+                'phase': _phase_of(ml_by_loc.get((fpath, line)), fpath, '<module>'),
+            })
+        if nodes:
+            print(f"          [PyFlow] GIR 为空，用能力命中合成 {len(nodes)} 个节点")
+    if not nodes:
+        print("          [PyFlow] 未产出任何节点")
         return None
     edges = build_edges(gir, nodes, cg, root)
 
