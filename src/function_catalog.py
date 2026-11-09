@@ -340,20 +340,58 @@ def select_clusters(catalog: List[Dict], fn_adj: Dict, top_n: int = 8,
 
 def expand_clusters(nodes: List[Dict], edges: List[Dict],
                     clusters: List[List[Dict]]) -> List[Dict]:
-    """把每个簇展开成一个块（簇内所有函数的全部语句 + 簇内边 + 边界边）。"""
+    """把每个簇展开成一个块（簇内**所有成员函数**的语句 + 簇内边 + 边界边）。
+
+    2026-11 修复：原实现取 expand_functions(...)[0]，只拿到第一个成员的
+    节点——块标签写着 3 个函数、实际只装 1 个，把"共犯同框"又拆散了。
+    """
+    by_fn: Dict[Tuple[str, str], List[Dict]] = defaultdict(list)
+    for n in nodes:
+        by_fn[_fn_key(n)].append(n)
+    by_id = {n['node_id']: n for n in nodes if n.get('node_id')}
+
     out = []
     for ci, members in enumerate(clusters, 1):
-        fn_keys = [tuple(r['key']) for r in members]
+        keys = [tuple(r['key']) for r in members]
+        blk_nodes: List[Dict] = []
+        for k in keys:
+            blk_nodes.extend(by_fn.get(k) or [])
+        if not blk_nodes:
+            continue
+        ids = {n['node_id'] for n in blk_nodes}
+
+        blk_edges = [e for e in edges
+                     if e.get('from_node') in ids and e.get('to_node') in ids]
+        bound = {'in': [], 'out': []}
+        for e in edges:
+            a, b = e.get('from_node'), e.get('to_node')
+            ia, ib = a in ids, b in ids
+            if ia == ib:
+                continue
+            rec = {
+                'from_node': a, 'to_node': b,
+                'from_file': (by_id.get(a) or {}).get('file', ''),
+                'from_line': (by_id.get(a) or {}).get('line', 0),
+                'to_file': (by_id.get(b) or {}).get('file', ''),
+                'to_line': (by_id.get(b) or {}).get('line', 0),
+                'from_func': (by_id.get(a) or {}).get('function_name') or '<module>',
+                'to_func': (by_id.get(b) or {}).get('function_name') or '<module>',
+                'kind': e.get('kind') or 'data',
+                'variable': e.get('variable') or '',
+            }
+            bound['out' if ia else 'in'].append(rec)
+
         names = ', '.join(f"{Path(r['file']).name}::{r['name']}"
                           for r in members[:3])
         if len(members) > 3:
-            names += f" +{len(members)-3}"
-        # 复用 expand_functions（单簇调用）
-        blk = expand_functions(nodes, edges, members)[0] if members else None
-        if not blk:
-            continue
-        blk['label'] = f"cluster{ci}: {names}"
-        blk['cluster'] = fn_keys
-        blk['cluster_score'] = sum(r['score'] for r in members)
-        out.append(blk)
+            names += f" +{len(members) - 3}"
+        out.append({
+            'label': f"cluster{ci}: {names}",
+            'nodes': blk_nodes,
+            'edges': blk_edges,
+            'boundary_edges': bound,
+            'cluster': keys,
+            'cluster_score': sum(r['score'] for r in members),
+            'meta': members[0],
+        })
     return out
