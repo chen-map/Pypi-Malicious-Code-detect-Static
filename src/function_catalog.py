@@ -152,6 +152,15 @@ def _score(rec: Dict) -> Tuple[float, List[str]]:
         score += 2
         reasons.append('module-level')
 
+    # 测试/示例目录降权：恶意包常把正版 tests/ 整包复制，纯噪声
+    try:
+        from src.benign_context import is_fixture_path
+        if is_fixture_path(rec['file']):
+            score *= 0.25
+            reasons.append('fixture×0.25')
+    except Exception:
+        pass
+
     return round(score, 2), reasons
 
 

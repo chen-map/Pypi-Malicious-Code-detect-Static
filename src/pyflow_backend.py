@@ -312,7 +312,9 @@ def _resolve_unit_file(unit_id: str, index) -> Tuple[str, str]:
                  '.'.join(unit_id.split('.')[-2:])):
         if cand in qualname_index:
             parts = unit_id.split('.')
-            return qualname_index[cand], (parts[-1] if len(parts) > 1 else '<module>')
+            # 裸函数名（无点号）= 顶层函数，不是模块级——这里曾把
+            # 86.6% 的节点误标成 <module>（实测 requsets 8625/9959）
+            return qualname_index[cand], (parts[-1] if len(parts) > 1 else unit_id)
     return '', '<module>'
 
 
