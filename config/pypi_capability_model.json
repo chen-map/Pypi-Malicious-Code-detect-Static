@@ -1,0 +1,114 @@
+{
+  "_comment": "PyPI threat-model capability model. Injected into PyFlow via --capability-model. Everything here is PyPI-specific: install-time hooks, package-manager credential files, loader persistence. PyFlow's bundled model is vulnerability-oriented (CWE), this one is attack-chain-oriented.",
+  "schema_version": 1,
+  "description": "PyPI malicious-package threat model: install-time execution, package credentials, loader persistence",
+  "patterns": [
+    {
+      "capability": "process.execute",
+      "category": "process",
+      "operation": "call",
+      "access_paths": [
+        "setuptools.command.install.install.run",
+        "setuptools.command.develop.develop.run",
+        "distutils.command.install.install.run",
+        "pip._internal.cli.main.main",
+        "wheel.bdist_wheel.bdist_wheel.run"
+      ]
+    },
+    {
+      "capability": "module.loader_mutation",
+      "category": "module",
+      "operation": "write",
+      "access_paths": [
+        "site.addsitedir",
+        "site.addpackage",
+        "sitecustomize",
+        "usercustomize"
+      ]
+    },
+    {
+      "capability": "information.credentials",
+      "category": "information",
+      "operation": "read",
+      "access_paths": [
+        "netrc.netrc",
+        "configparser.ConfigParser.read",
+        "keyring.get_password",
+        "getpass.getuser",
+        "pip._internal.network.auth.MultiDomainBasicAuth"
+      ]
+    },
+    {
+      "capability": "network.io",
+      "category": "network",
+      "operation": "call",
+      "access_paths": [
+        "requests.Session.send",
+        "httpx.Client.send",
+        "urllib.request.urlopen",
+        "urllib.request.urlretrieve",
+        "socket.create_connection",
+        "aiohttp.ClientSession.request",
+        "http.client.HTTPConnection.request"
+      ]
+    },
+    {
+      "capability": "code.execute",
+      "category": "code",
+      "operation": "call",
+      "access_paths": [
+        "runpy.run_path",
+        "runpy.run_module",
+        "importlib.util.spec_from_file_location",
+        "importlib.util.module_from_spec",
+        "imp.load_source",
+        "exec",
+        "eval",
+        "compile"
+      ]
+    },
+    {
+      "capability": "deserialization.unsafe",
+      "category": "deserialization",
+      "operation": "call",
+      "access_paths": [
+        "pickle.load",
+        "pickle.loads",
+        "dill.load",
+        "dill.loads",
+        "marshal.load",
+        "marshal.loads",
+        "yaml.unsafe_load",
+        "yaml.load"
+      ]
+    },
+    {
+      "capability": "file.write",
+      "category": "file",
+      "operation": "write",
+      "access_paths": [
+        "shutil.copy",
+        "shutil.copyfile",
+        "shutil.move",
+        "os.chmod",
+        "os.chown",
+        "pathlib.Path.write_text",
+        "pathlib.Path.write_bytes"
+      ]
+    },
+    {
+      "capability": "native.access",
+      "category": "native",
+      "operation": "call",
+      "access_paths": [
+        "ctypes.CDLL",
+        "ctypes.cdll.LoadLibrary",
+        "ctypes.windll.LoadLibrary",
+        "cffi.FFI.dlopen",
+        "os.setuid",
+        "os.setgid"
+      ]
+    }
+  ],
+  "effects": []
+}
