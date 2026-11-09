@@ -15,6 +15,7 @@
 验证配套见 llm_graph_analyst.verify_paths()。
 """
 import re
+from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 # 序列化时保留的边类型
@@ -46,11 +47,18 @@ def any_hostile_literal(paths: List[Dict], nodes: List[Dict]) -> bool:
     """
     by_id = {n.get('node_id'): (n.get('code') or '')
              for n in nodes if n.get('node_id')}
+    from src.literal_decoder import scan_code, decoded_has_risk
     for p in paths or []:
         for nid in p.get('nodes') or []:
-            code = (by_id.get(nid) or '').lower()
+            raw = by_id.get(nid) or ''
+            code = raw.lower()
             if any(t in code for t in _LITERAL_RISK):
                 return True
+            # 2026-11 混淆补偿：载荷藏在编码字面量里时，解一层再判
+            for hit in scan_code(raw):
+                if hit.get('risky') or any(t in hit['decoded'].lower()
+                                           for t in _LITERAL_RISK):
+                    return True
     return False
 
 
@@ -501,7 +509,30 @@ def digest(nodes: List[Dict], edges: List[Dict],
     # 矿池/反弹 shell IP/载荷 URL/编码串散落在各节点截断代码里；
     # 集中成表让模型把"基础设施 + 执行点"一眼关联。
     iocs = _extract_iocs(_selected)
-    if any(v for v in iocs.values() if v):
+
+    # 2026-11 单层自动解码（混淆盲区）：把编码字面量解开一层，
+    # 解出的内容既进 IOC 扫描也单独展示——quarejma-botnet 那类
+    # "载荷全在 base64 里"的包，不解码就等于没看见。
+    decoded_hits = []
+    try:
+        from src.literal_decoder import scan_code, decoded_has_risk
+        for n in _selected:
+            code = n.get('code') or ''
+            if _looks_like_ast_dump(code):
+                code = _source_line(n.get('file', ''), n.get('line', 0)) or code
+            for hit in scan_code(code):
+                hit['file'] = n.get('file', '')
+                hit['line'] = n.get('line', 0)
+                hit['risky'] = decoded_has_risk(hit['decoded'])
+                decoded_hits.append(hit)
+                if len(decoded_hits) >= 8:
+                    break
+            if len(decoded_hits) >= 8:
+                break
+    except Exception:
+        decoded_hits = []
+
+    if any(v for v in iocs.values() if v) or decoded_hits:
         lines.append('')
         lines.append('## SUSPICIOUS LITERALS  (endpoints / payloads found in code)')
         _ioc_label = {'ip_endpoint': 'IP:endpoint', 'url': 'URL',
@@ -511,6 +542,11 @@ def digest(nodes: List[Dict], edges: List[Dict],
             if not vals:
                 continue
             lines.append(f'  {_ioc_label.get(kind, kind)}: ' + ' | '.join(vals[:6]))
+        for h in decoded_hits:
+            flag = '  <<HOSTILE CONTENT>>' if h['risky'] else ''
+            lines.append(f"  decoded-{h['method']}: "
+                         f"{h['decoded'][:110]!r}{flag}"
+                         f"   (from {Path(h['file']).name}:{h['line']})")
         lines.append('If a LITERAL above appears near an execution sink, '
                      'name it explicitly in why_malicious.')
 

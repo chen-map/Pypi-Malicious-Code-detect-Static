@@ -24,6 +24,7 @@ TESTS = [
     'test_cross_scope.py',
     'test_benign_context.py',
     'test_pyflow_backend.py',
+    'test_engine_merge.py',
     'test_artifact_scanner.py',
 ]
 

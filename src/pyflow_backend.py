@@ -267,20 +267,17 @@ def _resolve_unit_file(unit_id: str, file_index: Dict[str, str]):
     return file_index[best], func
 
 
-def build_nodes(gir: Dict, caps: Dict, project_dir: Path) -> List[Dict]:
+def build_nodes(gir: Dict, caps: Dict, project_dir: Path,
+                sso_result: Optional[Dict] = None) -> List[Dict]:
     """GIR 语句 → 我们的节点 dict（语句级，带真实行号与源码）。
 
     capability 由 capabilities findings 按 (file, line) 对齐后标注。
     """
-    # capability 索引：绝对路径 + 行号 → 能力类
-    cap_by_loc: Dict[Tuple[str, int], Set[str]] = {}
-    for f in (caps.get('findings') or []):
-        loc = f.get('location') or {}
-        cap = map_capability(f.get('capability') or '')
-        if not cap or not loc.get('file'):
-            continue
-        key = (str(Path(loc['file']).resolve()), int(loc.get('line') or 0))
-        cap_by_loc.setdefault(key, set()).add(cap)
+    # capability 索引：绝对路径 + 行号 → 能力类（PyFlow ∪ 我们的 SSO）
+    # 两个引擎盲区互补：PyFlow 有 IFDS/别名，SSO 有常量折叠/getattr 还原
+    from src.engine_merge import merge_capabilities, pick_capability
+    cap_by_loc, module_level_by_loc = merge_capabilities(
+        caps, sso_result, project_dir)
 
     file_index = _build_file_index(project_dir)
     nodes: List[Dict] = []
@@ -318,7 +315,8 @@ def build_nodes(gir: Dict, caps: Dict, project_dir: Path) -> List[Dict]:
                 continue
             seen.add(node_id)
             caps_here = cap_by_loc.get((fpath, line1)) or set()
-            cap = sorted(caps_here, key=lambda c: CAPABILITY_TIER.get(c, 9))[0] if caps_here else ''
+            cap = pick_capability(caps_here)
+            _ml = module_level_by_loc.get((fpath, line1))
             nodes.append({
                 'node_id': node_id,
                 'file': fpath,                 # 绝对路径：digest._source_line 需要
@@ -332,6 +330,8 @@ def build_nodes(gir: Dict, caps: Dict, project_dir: Path) -> List[Dict]:
                 'severity': severity_for(cap) if cap else 'safe',
                 '_stmt_id': s['stmt_id'],
                 '_unit': head,
+                'module_level': _ml,
+                'phase': _phase_of(_ml, fpath, func_name),
             })
     return nodes
 
@@ -422,18 +422,16 @@ def build_edges(gir: Dict, nodes: List[Dict], callgraph: Dict,
 def execution_phase(node: Dict, project_dir: Path) -> str:
     """节点所在代码的执行时机：install / import / runtime。
 
-    setup.py 顶层 → install（pip install 即执行）
-    __init__.py 顶层 → import
-    函数体内 → runtime
+    module_level 由 SSO 的 AST 判定（比文件名启发准确）；缺失时回落。
     """
-    f = node.get('file') or ''
-    name = Path(f).name
-    is_module_level = (node.get('function_name') in (None, '', '<module>'))
-    if name in ('setup.py', 'conftest.py') and is_module_level:
-        return 'install'
-    if name == '__init__.py' and is_module_level:
-        return 'import'
-    return 'runtime'
+    from src.engine_merge import phase_of
+    ml = node.get('module_level')
+    return phase_of(ml, node.get('file') or '', node.get('function_name'))
+
+
+def _phase_of(module_level, filepath, func_name) -> str:
+    from src.engine_merge import phase_of
+    return phase_of(module_level, filepath, func_name)
 
 
 # ===== 对外主入口 =====
@@ -464,7 +462,13 @@ def analyze(project_dir, max_seconds: int = 60,
         print(f"          [PyFlow] 分析失败: {e}")
         return None
 
-    nodes = build_nodes(gir, caps, root)
+    # SSO ∪ PyFlow：补 PyFlow 的 getattr/常量折叠盲区
+    from src.engine_merge import collect_sso
+    sso = collect_sso(root)
+    if sso:
+        n_sso = len(sso.get('findings') or [])
+        print(f"          [SSO] {n_sso} 个能力命中（与 PyFlow 合并）")
+    nodes = build_nodes(gir, caps, root, sso_result=sso)
     if not nodes:
         print("          [PyFlow] 未产出语句节点（GIR 为空）")
         return None
@@ -481,7 +485,7 @@ def analyze(project_dir, max_seconds: int = 60,
     phases: Dict[str, int] = {}
     for n in nodes:
         if n.get('capability'):
-            ph = execution_phase(n, root)
+            ph = n.get('phase') or execution_phase(n, root)
             phases[ph] = phases.get(ph, 0) + 1
 
     coverage = caps.get('coverage') or {}
