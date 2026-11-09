@@ -297,6 +297,8 @@ def analyze(nodes: List[Dict], edges: List[Dict]) -> List[Dict]:
             # hardcoded_payload（不解执行，只扫文本）。
             payload_kind = _decoded_payload_kind(code)
             if not payload_kind:
+                payload_kind = _literal_payload_kind(code)
+            if not payload_kind:
                 continue
         sink_id = sink_node.get('node_id')
         if not sink_id:
@@ -486,6 +488,28 @@ def merge_chains(primary: List[Dict], secondary: List[Dict],
         if len(out) >= max_chains:
             break
     return out
+
+
+
+# 明文字面量载荷：tlsshield 族把一个"下载并执行"的脚本作为字符串写盘再运行
+#   _ttmp.write(b"...urlopen('https://paste.../raw')...exec(...)")
+#   os.system(f"start {python} {tmp}")
+# 判据：同一节点里同时出现「远程获取」与「执行」两类 API。
+_LITERAL_FETCH_RE = re.compile(
+    r'(urlopen|urlretrieve|requests\.(get|post)|httpx\.(get|post)|'
+    r'urllib\.request)', re.IGNORECASE)
+_LITERAL_EXEC_RE = re.compile(
+    r'(exec\s*\(|eval\s*\(|os\.system|subprocess\.|popen\s*\()',
+    re.IGNORECASE)
+
+
+def _literal_payload_kind(code: str) -> str:
+    """明文字面量里同时含"下载"和"执行" → 远程执行载荷。"""
+    if not code or len(code) > _MATCH_CHARS * 4:
+        return ''
+    if _LITERAL_FETCH_RE.search(code) and _LITERAL_EXEC_RE.search(code):
+        return 'literal_remote_exec'
+    return ''
 
 
 def format_for_prompt(chains: List[Dict], max_chains: int = 4) -> str:
