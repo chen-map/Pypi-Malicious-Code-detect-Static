@@ -139,8 +139,15 @@ def signal_destination(nodes: List[Dict], declared: Set[str]) -> Dict:
     if checked == 0:
         return {'score': None, 'reason': 'no resolvable network target'}
     if attacker:
-        return {'score': 0.0, 'reason': f'{attacker}/{checked} targets are attacker infra'}
-    return {'score': 1.0, 'reason': f'{own}/{checked} targets are well-formed domains',
+        # 明确指向攻击设施 —— 一票否决
+        return {'score': 0.0, 'veto': True,
+                'reason': f'{attacker}/{checked} targets are attacker infra'}
+    if own == 0:
+        # 有目标但一个都解析不出域名（requsets: 0/90）→ "不知道"，不是"好"
+        return {'score': None,
+                'reason': f'0/{checked} targets resolvable to a domain'}
+    return {'score': own / checked,
+            'reason': f'{own}/{checked} targets are well-formed domains',
             'details': details[:3]}
 
 
@@ -201,9 +208,13 @@ def signal_code_style(nodes: List[Dict]) -> Dict:
             penalties += 1
             reasons.append('dynamically constructed API name')
             break
-    score = max(0.0, 1.0 - 0.4 * penalties)
-    return {'score': score,
-            'reason': f'{penalties} evasion signals' + (f': {reasons}' if reasons else '')}
+    score = max(0.0, 1.0 - 0.5 * penalties)
+    out = {'score': score,
+           'reason': f'{penalties} evasion signals' + (f': {reasons}' if reasons else '')}
+    if penalties >= 2:
+        # 编码载荷 + 动态构造 API 名同现 = 恶意包标配（requsets 实测）
+        out['veto'] = True
+    return out
 
 
 def signal_dependencies(nodes: List[Dict], caps: Set[str]) -> Dict:
@@ -227,8 +238,12 @@ def signal_dependencies(nodes: List[Dict], caps: Set[str]) -> Dict:
             covered.append(c)
         else:
             uncovered.append(c)
-    if not covered and not uncovered:
-        return {'score': None, 'reason': 'no mapped capability'}
+    if not uncovered:
+        return {'score': 1.0 if covered else None,
+                'reason': f'backed by known libs: {covered}'}
+    if not covered:
+        # 全靠自研实现——不是恶意证据，只是没有正面证据
+        return {'score': None, 'reason': f'no known library backs {uncovered}'}
     return {'score': len(covered) / (len(covered) + len(uncovered)),
             'reason': f'backed by known libs: {covered}; raw: {uncovered}'}
 
@@ -259,17 +274,28 @@ def assess(pkg_dir, nodes: List[Dict], caps: Set[str],
                 'reason': f'age={age}d versions={versions}',
             }
 
-    # 任一信号为 0（攻击设施 / 强规避）→ 直接否决
-    hard_veto = any(s.get('score') == 0.0 for s in signals.values())
-    scored = [s['score'] for s in signals.values() if s.get('score') is not None]
-    score = (sum(scored) / len(scored)) if scored else None
-    if hard_veto:
+    # 加权：真正有区分力的是"目的地"和"代码风格"。
+    # docs / deps 几乎恒为高分（恶意包的 README 也说自己是 HTTP 库），
+    # 只作为弱佐证。
+    weights = {'destination': 0.35, 'code_style': 0.30,
+               'docs': 0.20, 'deps': 0.15, 'ecosystem': 0.25}
+    veto = any(s.get('veto') for s in signals.values())
+    num = den = 0.0
+    for k, s in signals.items():
+        sc = s.get('score')
+        if sc is None:
+            continue
+        w = weights.get(k, 0.1)
+        num += sc * w
+        den += w
+    score = (num / den) if den else None
+    if veto:
         score = 0.0
 
     return {
         'score': None if score is None else round(score, 3),
         'allow_benign': bool(score is not None and score >= ALLOW_THRESHOLD
-                             and not hard_veto),
+                             and not veto),
         'signals': signals,
         'reasons': [f"{k}: {v.get('reason')}" for k, v in signals.items()],
     }
