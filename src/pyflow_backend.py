@@ -813,6 +813,11 @@ class _Node:
                  'sink_expansion', 'taint_categories', 'capability')
 
     def __init__(self, d: Dict):
+        # 2026-11：沿用 analyze() 的 node_id 作为唯一身份。此前 get_id()
+        # 用 f"{file}_{line}_{col}"，而 analyze 的节点 dict 没有 col 字段
+        # → col 恒为 0 → 同行节点互相覆盖；同时边查表按**相对**路径重组
+        # 键、节点键是**绝对**路径 → 键不一致 → **整包边全部丢失**。
+        self._nid = d.get('node_id') or ''
         self.file = d.get('file', '')
         self.line = int(d.get('line') or 0)
         self.col_offset = int(d.get('col') or 0)
@@ -826,7 +831,7 @@ class _Node:
         self.capability = d.get('capability') or ''
 
     def get_id(self) -> str:
-        return f"{self.file}_{self.line}_{self.col_offset}"
+        return self._nid or f"{self.file}_{self.line}_{self.col_offset}"
 
 
 class _Edge:
@@ -889,15 +894,9 @@ def build_result(project_dir, max_seconds: int = 60,
 
     edges: List[_Edge] = []
     for e in base['edges']:
-        # 直接按 (file,line,col) 重组 id，与 _Node.get_id() 对齐
-        def _lookup(raw_id: str):
-            parts = raw_id.rsplit(':', 2)
-            if len(parts) != 3:
-                return None
-            f, ln, col = parts
-            return by_id.get(f"{f}_{ln}_{col}")
-        a = _lookup(e['from_node'])
-        b = _lookup(e['to_node'])
+        # 直接按 analyze 的 node_id 查（与 _Node.get_id() 同一套键）
+        a = by_id.get(e.get('from_node'))
+        b = by_id.get(e.get('to_node'))
         if a and b:
             edges.append(_Edge(a, b, e.get('kind') or 'data',
                                e.get('variable') or ''))
