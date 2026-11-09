@@ -61,6 +61,19 @@ PER_PACKAGE_TIMEOUT = 900
 # 成本线性爆炸 → 超时。按危险节点数保留最危险的前 N 个。
 MAX_SUBGRAPHS_ANALYZED = 400
 
+# ===== 2026-11 大包拆分阈值 =====
+# 建图侧：py 文件数超过此值 → SSO 粗筛选中子集建图（agent_framework
+# 1093 文件全量建图 CPU 40 分钟是 ANALYSIS_TIMEOUT 主因）
+LARGE_PKG_FILE_THRESHOLD = 150
+# 分析侧：子图数或全图节点数超过任一阈值 → 跳过 400 子图机器，
+# 直接走块划分快路径（block_nodes=300/max_blocks=16/420s）
+LARGE_PKG_SUBGRAPH_THRESHOLD = 200
+LARGE_PKG_NODE_THRESHOLD = 6000
+# 大包块划分预算（放大幅度受 900s 包级信封约束：SSO 已砍掉大部分建图时间）
+LARGE_PKG_BLOCK_NODES = 300
+LARGE_PKG_MAX_BLOCKS = 16
+LARGE_PKG_TIME_BUDGET_S = 420
+
 
 def _analyze_one_in_subprocess(input_path, input_type, worker_kwargs, results_jsonl_str):
     """子进程 worker: 构造独立 analyzer 分析单包并落盘结果行。
@@ -150,7 +163,8 @@ def _flagged_code_signals(verdicts, subgraph_jsons, max_funcs=4, max_chars=1200)
 
 
 def _llm_escalation_corroborated(enhanced_detection_result, voting_result,
-                                 ignore_pypi_gate=False, block_scan=None):
+                                 ignore_pypi_gate=False, block_scan=None,
+                                 subgraph_jsons=None):
     """包级 LLM 升级 MALICIOUS 的机械复核（2026-11）。
 
     弱模型实测会无视 prompt 判据（良性 fork 名被 "typosquatting high" 或
@@ -169,15 +183,28 @@ def _llm_escalation_corroborated(enhanced_detection_result, voting_result,
     #  导致 strong_chain 误判为 True,弱链升级被放行。）
     flagged = [v for v in (voting_result or {}).get('subgraph_verdicts', [])
                if v.get('final_verdict') in ('SUSPICIOUS', 'MALICIOUS')]
-    strong_chain = any(escalation_gate(v.get('taint_chains')) for v in flagged)
+    # 目标感知需要节点代码：从 subgraph_jsons 按名取回
+    _sg_nodes = {}
+    if subgraph_jsons:
+        _by_name = {s.get('subgraph_name'): s for s in subgraph_jsons}
+        for v in flagged:
+            _sg_nodes[v.get('subgraph_name')] = \
+                (_by_name.get(v.get('subgraph_name')) or {}).get('nodes')
+    strong_chain = any(
+        escalation_gate(v.get('taint_chains'),
+                        nodes=_sg_nodes.get(v.get('subgraph_name')))
+        for v in flagged)
     if ed_lvl == 'critical':
         return True, '增强通道 critical'
     if strong_chain:
         return True, '可疑子图自带强污点链'
     # 2026-11 包块划分：整包逐块读出来的链已经过 verify_paths 验证，
+    # 且必须含敌意字面量（升级门收紧后两条件同时满足才到得了这里），
     # 属于结构性证据（每一跳都对应真实存在的边）。
-    if block_scan and (block_scan.get('valid_paths') or []):
-        return True, f"包块划分验证链 {len(block_scan['valid_paths'])} 条"
+    if (block_scan and (block_scan.get('valid_paths') or [])
+            and block_scan.get('_hostile_literal')):
+        return True, (f"包块划分验证链 {len(block_scan['valid_paths'])} 条"
+                      f"（含敌意字面量）")
     if pypi_st == 'not_found' and not ignore_pypi_gate:
         return True, 'PyPI not_found'
     return False, (f'无结构性证据(ed={ed_lvl}, pypi={pypi_st or "n/a"}, '
@@ -217,7 +244,13 @@ class BatchAnalyzerV20Voting:
 
     def __init__(self, tarfile_dir: str, llm: str = 'glm', api_key: str = '', count: int = 100, extract_base: str = 'output/packages', skip_rule_scoring: bool = False, parallel_workers: int = 1, seed: int = 42, verify_pypi: bool = False, use_llm_cache: bool = True, sandbox: bool = False,
                 llm_model: str = 'glm-4-flashx', ignore_pypi_gate: bool = False,
-                block_scan: bool = True):
+                block_scan: bool = True, cross_scope: bool = True,
+                graph_backend: str = 'builtin',
+                llm_pipeline: str = 'single',
+                llm_model_small: str = '', llm_model_big: str = '',
+                pyflow_max_seconds: int = 60,
+                pyflow_capability_model: str = '',
+                coverage_max_skip: float = 0.30):
         self.tarfile_dir = Path(tarfile_dir)
         self.llm = llm
         self.api_key = api_key
@@ -236,6 +269,19 @@ class BatchAnalyzerV20Voting:
         # 2026-11 包块划分：机械投票落在歧义区时，整包图按文件→函数分块
         # 逐块读（不看是否被正则标记），作为第二意见。--no-block-scan 关闭。
         self.block_scan = block_scan
+        # 2026-11 消融开关（--no-cross-scope）：关闭跨块边 + 全图链分发，
+        # 用于量化"跨作用域证据"本身的增益
+        self.cross_scope = cross_scope
+        # 2026-11 图后端 / LLM 管道 / 覆盖度门控
+        self.graph_backend = graph_backend          # builtin | pyflow
+        self.llm_pipeline = llm_pipeline            # single | two_stage
+        self.llm_model_small = llm_model_small or llm_model
+        self.llm_model_big = llm_model_big or llm_model
+        self.pyflow_max_seconds = pyflow_max_seconds
+        self.pyflow_capability_model = pyflow_capability_model
+        self.coverage_max_skip = coverage_max_skip
+        # 2026-11 合法性通道（正面证据，只能放行不能定罪）
+        self.use_legitimacy = True
         self._full_graph = None   # 当前包的整图快照（_run_ddg_builder 填充）
         self.results = []
         self.results_jsonl = None  # 增量落盘文件（analyze_all 时初始化）
@@ -264,6 +310,14 @@ class BatchAnalyzerV20Voting:
             'sandbox': self.sandbox,
             'llm_model': self.llm_model,
             'block_scan': self.block_scan,
+            'cross_scope': self.cross_scope,
+            'graph_backend': self.graph_backend,
+            'llm_pipeline': self.llm_pipeline,
+            'llm_model_small': self.llm_model_small,
+            'llm_model_big': self.llm_model_big,
+            'pyflow_max_seconds': self.pyflow_max_seconds,
+            'pyflow_capability_model': self.pyflow_capability_model,
+            'coverage_max_skip': self.coverage_max_skip,
         }
 
     def analyze_all(self):
@@ -585,19 +639,52 @@ class BatchAnalyzerV20Voting:
                 simplified_verdict['key_info'] = verdict.get('key_info', verdict.get('reasoning', ''))[:200]
             simplified_verdicts.append(simplified_verdict)
 
-        # ===== 2026-11 包块划分（歧义区第二意见）=====
+        # ===== 2026-11 包块划分（歧义区第二意见 / 大包主路径）=====
         # 投票路径只看"被标记的函数"——召回上限 = 标记器召回率。机械投票
         # 落在 SUSPICIOUS 时，用整包图按文件→函数分块逐块读，粗筛只用于
         # 预算排序。只有**验证通过的链**才允许升级（反幻觉契约不变）。
+        # 大包（_is_large）走块划分是**主路径**：rule-only 投票没有 LLM
+        # 语义判断，不再有"歧义区"概念，直接整包读。
+        _is_large = (len(subgraph_jsons) > LARGE_PKG_SUBGRAPH_THRESHOLD
+                     or len((self._full_graph or {}).get('nodes') or [])
+                     > LARGE_PKG_NODE_THRESHOLD)
         block_scan = None
-        if (self.block_scan
-                and voting_result['final_category'] in ('SUSPICIOUS', 'UNKNOWN')):
-            block_scan = self._full_block_scan(package_name)
+        _block_gate = (voting_result['final_category'] in ('SUSPICIOUS', 'UNKNOWN')
+                       or (_is_large and not self.skip_rule_scoring))
+        if self.block_scan and _block_gate:
+            if self.llm_pipeline == 'two_stage':
+                # 2026-11 两阶段接管块划分：小模型提链 → 验证 → 大模型判定
+                block_scan = self._two_stage_scan(
+                    package_name, package_dir,
+                    block_nodes=LARGE_PKG_BLOCK_NODES if _is_large else 250,
+                    max_blocks=LARGE_PKG_MAX_BLOCKS if _is_large else 6,
+                    time_budget_s=LARGE_PKG_TIME_BUDGET_S if _is_large else 240)
+            else:
+                block_scan = self._full_block_scan(
+                    package_name,
+                    block_nodes=LARGE_PKG_BLOCK_NODES if _is_large else 250,
+                    max_blocks=LARGE_PKG_MAX_BLOCKS if _is_large else 6,
+                    time_budget_s=LARGE_PKG_TIME_BUDGET_S if _is_large else 240)
             if (block_scan and block_scan.get('verdict') == 'MALICIOUS'
                     and block_scan.get('valid_paths')):
-                voting_result['final_category'] = 'MALICIOUS'
-                voting_result['block_scan_escalated'] = True
-                print("        [包块划分] 验证链成立 → 升级 MALICIOUS")
+                # 2026-11 升级收紧（google_re2 误升级驱动）：verify_paths
+                # 只保证边存在——正则库 re2.compile 的链同样是真实边。
+                # 升级要求链上至少一个敌意字面量节点；否则维持原判决，
+                # 交给包级 LLM 做语义判断。
+                from src.graph_digest import any_hostile_literal
+                _hostile = any_hostile_literal(
+                    block_scan['valid_paths'],
+                    (self._full_graph or {}).get('nodes') or [])
+                if _hostile:
+                    voting_result['final_category'] = 'MALICIOUS'
+                    voting_result['block_scan_escalated'] = True
+                    block_scan['_hostile_literal'] = True
+                    print("        [包块划分] 验证链成立 → 升级 MALICIOUS")
+                else:
+                    block_scan['escalation_blocked'] = (
+                        'no hostile literal in verified paths')
+                    print("        [包块划分] 验证链无敌意字面量 → 不升级"
+                          "（维持 " + voting_result['final_category'] + "）")
 
         # 2026-11 包级 LLM 聚合分析：所有子图分析完后，LLM 综观全部证据
         # 做最终全局判断（替代机械投票——投票不理解"1个可疑比83个良性重要"）
@@ -623,7 +710,8 @@ class BatchAnalyzerV20Voting:
                         ok, why = _llm_escalation_corroborated(
                             enhanced_detection_result, voting_result,
                             ignore_pypi_gate=self.ignore_pypi_gate,
-                            block_scan=block_scan)
+                            block_scan=block_scan,
+                            subgraph_jsons=subgraph_jsons)
                         if not ok:
                             new_cat = 'SUSPICIOUS'
                             voting_result['llm_escalation_demoted'] = True
@@ -650,7 +738,8 @@ class BatchAnalyzerV20Voting:
             _ok, _why = _llm_escalation_corroborated(
                 enhanced_detection_result, voting_result,
                 ignore_pypi_gate=self.ignore_pypi_gate,
-                block_scan=block_scan)
+                block_scan=block_scan,
+                subgraph_jsons=subgraph_jsons)
             if not _ok:
                 print(f"        [最终保险] MALICIOUS 无结构性证据({_why}) → SUSPICIOUS")
                 voting_result['final_category'] = 'SUSPICIOUS'
@@ -659,6 +748,68 @@ class BatchAnalyzerV20Voting:
                     + (voting_result.get('voting_summary') or '')[:200])
                 voting_result['final_confidence'] = min(
                     float(voting_result.get('final_confidence') or 0.5), 0.6)
+
+        # ===== 2026-11 覆盖度门控（unknown ≠ safe）=====
+        # PyFlow 如实报告 entries_analyzed/entries_total。分析没覆盖到的
+        # 部分，"没找到证据"不等于"干净"——只因分析不完整而 BENIGN 的判决
+        # 一律降为 SUSPICIOUS，理由可审计。只降不升，且已有 Tier-1 能力
+        # 时不受影响。
+        coverage_info = None
+        if self.graph_backend == 'pyflow':
+            try:
+                from src.coverage_gate import apply_to_verdict
+                _cov = (getattr(self, '_graph_coverage', None) or {})
+                _caps = (getattr(self, '_graph_capabilities', None) or {})
+                _tier1 = any(c in ('process_spawn', 'code_eval', 'network_out',
+                                   'privilege', 'credential_access')
+                             for c in _caps)
+                _new_cat, _assess = apply_to_verdict(
+                    voting_result['final_category'], _cov,
+                    has_tier1_capability=_tier1,
+                    max_skip_ratio=self.coverage_max_skip)
+                coverage_info = _assess
+                if _new_cat != voting_result['final_category']:
+                    print(f"        [覆盖度门控] BENIGN → SUSPICIOUS: {_assess['reason']}")
+                    voting_result['final_category'] = _new_cat
+                    voting_result['voting_summary'] = (
+                        f"[覆盖度] {_assess['reason']}; "
+                        + (voting_result.get('voting_summary') or '')[:200])
+                    voting_result['final_confidence'] = min(
+                        float(voting_result.get('final_confidence') or 0.5), 0.55)
+            except Exception as _cg_err:
+                print(f"        [WARN] 覆盖度门控失败: {_cg_err}")
+
+        # ===== 2026-11 合法性通道（正面证据）=====
+        # 铁律：合法性证据只能把 SUSPICIOUS 降为 BENIGN，永不能定罪。
+        # 与"启发式永不定罪"对称：攻击性证据有升权，合法性证据有降权，
+        # 两者不能互相越界。
+        legitimacy_info = None
+        if (voting_result['final_category'] == 'SUSPICIOUS'
+                and self.use_legitimacy):
+            try:
+                from src.legitimacy import assess as assess_legitimacy
+                _g = self._full_graph or {}
+                _caps = set((getattr(self, '_graph_capabilities', {}) or {}).keys())
+                _stats = None
+                try:
+                    _pv = (enhanced_detection_result or {}).get('pypi_verification') or {}
+                    _stats = _pv.get('release_stats') if _pv.get('status') == 'exists' else None
+                except Exception:
+                    _stats = None
+                legitimacy_info = assess_legitimacy(
+                    package_dir, _g.get('nodes') or [], _caps, pypi_stats=_stats)
+                if legitimacy_info.get('allow_benign'):
+                    print(f"        [合法性通道] SUSPICIOUS → BENIGN "
+                          f"(score={legitimacy_info['score']})")
+                    voting_result['final_category'] = 'BENIGN'
+                    voting_result['voting_summary'] = (
+                        f"[合法性] 行为与声明一致 (score={legitimacy_info['score']}): "
+                        + '; '.join(legitimacy_info.get('reasons', [])[:2])
+                        + ' | ' + (voting_result.get('voting_summary') or '')[:150])
+                    voting_result['final_confidence'] = max(
+                        float(voting_result.get('final_confidence') or 0.5), 0.7)
+            except Exception as _leg_err:
+                print(f"        [WARN] 合法性通道失败: {_leg_err}")
 
         # 精简格式：只保留核心字段
         final_result = {
@@ -687,6 +838,16 @@ class BatchAnalyzerV20Voting:
                 'valid_paths': len(block_scan.get('valid_paths') or []),
                 'reasoning': (block_scan.get('reasoning') or '')[:200],
             } if block_scan else None),
+            # 2026-11 图后端与覆盖度审计
+            'graph_backend': getattr(self, '_graph_backend', 'builtin'),
+            'coverage': coverage_info,
+            'legitimacy': ({'score': legitimacy_info.get('score'),
+                            'allow_benign': legitimacy_info.get('allow_benign'),
+                            'reasons': legitimacy_info.get('reasons')}
+                           if legitimacy_info else None),
+            'capabilities': (getattr(self, '_graph_capabilities', {}) or None),
+            'execution_phases': (getattr(self, '_graph_phases', {}) or None),
+            'llm_pipeline': self.llm_pipeline,
             # 增强检测结果（总是包含）
             'enhanced_detection': {
                 'threat_level': enhanced_detection_result['overall_threat_level'],
@@ -701,7 +862,149 @@ class BatchAnalyzerV20Voting:
 
         return final_result
 
-    def _full_block_scan(self, package_name: str):
+    def _two_stage_scan(self, package_name: str, package_dir,
+                        block_nodes: int = 250, max_blocks: int = 6,
+                        time_budget_s: float = 240):
+        """两阶段块扫描：小模型提链 → 程序验证 → 大模型判定（2026-11 接线）。
+
+        与 _full_block_scan 的差别：后者一个模型干两件事（读图找链 + 判定），
+        这里按认知任务拆分：
+          Stage 1 小模型（大输入，机械任务）：读 digest 提议路径
+          程序验证：每跳必须是真实边（反幻觉契约不变）
+          Stage 2 强模型（小输入，语义任务）：只看已验证路径 + 源码 + 包意图
+
+        返回与 analyze_package_graph 同形的 dict，供上层统一消费。
+        """
+        if not self.api_key or self.api_key == 'dummy':
+            return None
+        g = self._full_graph
+        if not g or not g.get('nodes'):
+            return None
+
+        try:
+            from src.two_stage_judge import analyze_two_stage
+            from src.package_graph_analysis import _split_blocks
+            from zhipuai import ZhipuAI
+
+            client = ZhipuAI(api_key=self.api_key)
+            # 2026-11 函数目录选 top-N（替代按文件/函数预算切块）：
+            # 出入度 + 能力等级 + 执行时机 + 敌意字面量打分，
+            # 让 LLM 只看"最可能有链"的 N 个完整函数，而不是随机切块。
+            try:
+                from src.function_catalog import (
+                    build_catalog, select_top, expand_functions,
+                    build_function_graph, select_clusters, expand_clusters)
+                _cat = build_catalog(g['nodes'], g['edges'])
+                # 2026-11 按簇交付（解决 A→B 拆分攻击）：种子函数 +
+                # 函数图上的调用闭包，一起给 LLM，避免"各自清白"。
+                _fadj = build_function_graph(g['nodes'], g['edges'])
+                _seeds = select_top(_cat, n=max_blocks, min_score=2.0)
+                # 2026-11 二次划分：小模型读目录，可追加它认为值得看的函数
+                # （程序只看得到能力和度数，看不到"这两个合起来像攻击"）
+                try:
+                    from src.function_catalog import (
+                        render_selection_view, SELECT_PROMPT,
+                        parse_selection, resolve_selection)
+                    _view = render_selection_view(_cat, _seeds)
+                    _msg = SELECT_PROMPT.format(
+                        max_extra=max(2, max_blocks // 3),
+                        n_preselected=len(_seeds),
+                        preselected=render_selection_view(_cat, _seeds, 1200)
+                        .split(chr(10))[0] if _seeds else '',
+                        catalog=_view)
+                    _resp = client.chat.completions.create(
+                        model=self.llm_model_small,
+                        messages=[{"role": "user", "content": _msg}],
+                        temperature=0.0, max_tokens=400)
+                    _txt = (_resp.choices[0].message.content
+                            if _resp.choices else '') or ''
+                    _extra = resolve_selection(_cat, parse_selection(_txt))
+                    if _extra:
+                        seen = {tuple(r['key']) for r in _seeds}
+                        _seeds = _seeds + [r for r in _extra
+                                           if tuple(r['key']) not in seen]
+                        print(f"        [二次划分] LLM 追加 {len(_extra)} 个函数: "
+                              + ', '.join(f"{Path(r['file']).name}::{r['name']}"
+                                          for r in _extra[:4]))
+                except Exception as _sel_err:
+                    print(f"        [二次划分] 跳过: {_sel_err}")
+                _clusters = select_clusters(
+                    _cat, _fadj, top_n=len(_seeds) or max_blocks,
+                    expand_hops=2, seed_override=_seeds)
+                if _clusters:
+                    blocks = expand_clusters(g['nodes'], g['edges'], _clusters)
+                    print(f"        [函数簇] {len(_cat)} 函数 → "
+                          f"{len(_clusters)} 簇 / "
+                          f"{sum(len(c) for c in _clusters)} 函数")
+                    for _b in blocks[:5]:
+                        print(f"          · {_b['label']} "
+                              f"({len(_b['nodes'])} stmt)")
+                elif _cat:
+                    _top = select_top(_cat, n=max_blocks, min_score=2.0)
+                    blocks = expand_functions(g['nodes'], g['edges'], _top)
+                    print(f"        [函数目录] 回退单函数 top{len(_top)}")
+                else:
+                    blocks = _split_blocks(g['nodes'], g['edges'],
+                                           block_nodes=block_nodes,
+                                           max_blocks=max_blocks)
+            except Exception as _cat_err:
+                print(f"        [WARN] 函数目录失败，回退切块: {_cat_err}")
+                blocks = _split_blocks(g['nodes'], g['edges'],
+                                       block_nodes=block_nodes,
+                                       max_blocks=max_blocks)
+            import time as _time
+            t0 = _time.time()
+            # 归一化：expand_clusters 返回 dict，_split_blocks 返回 4 元组
+            _norm = []
+            for _b in blocks:
+                if isinstance(_b, dict):
+                    _norm.append((_b.get('label'), _b.get('nodes') or [],
+                                  _b.get('edges') or [],
+                                  _b.get('boundary_edges') or {}))
+                else:
+                    _norm.append(tuple(_b)[:4])
+            blocks = _norm
+            block_results, all_paths = [], []
+            mal_blocks = []
+            for label, b_nodes, b_edges, b_boundary in blocks:
+                if _time.time() - t0 > time_budget_s:
+                    print(f"        [两阶段] 超时预算 {time_budget_s:.0f}s，"
+                          f"停在 {len(block_results)}/{len(blocks)} 块")
+                    break
+                r = analyze_two_stage(
+                    b_nodes, b_edges,
+                    client, self.llm_model_small,
+                    client, self.llm_model_big,
+                    samples=1, package_dir=package_dir)
+                r['block'] = label
+                r['block_nodes'] = len(b_nodes)
+                block_results.append(r)
+                if r.get('verdict') == 'MALICIOUS' and r.get('stage1_paths'):
+                    mal_blocks.append((label, r))
+            verdict = ('MALICIOUS' if mal_blocks else
+                       'SUSPICIOUS' if any(b.get('verdict') == 'SUSPICIOUS'
+                                           for b in block_results) else
+                       'BENIGN' if block_results else 'UNKNOWN')
+            print(f"        [两阶段] {len(block_results)} 块 → {verdict} "
+                  f"(小={self.llm_model_small}, 大={self.llm_model_big})")
+            return {
+                'verdict': verdict,
+                'confidence': 0.8 if verdict == 'BENIGN' else 0.6,
+                'reasoning': '; '.join(f"{lb}: {r.get('stage2_summary', '')[:60]}"
+                                       for lb, r in mal_blocks[:3]),
+                'block_results': block_results,
+                'valid_paths': all_paths,
+                'blocks_analyzed': len(block_results),
+                'nodes_total': len(g['nodes']),
+                'truncated_by_budget': len(block_results) < len(blocks),
+                'pipeline': 'two_stage',
+            }
+        except Exception as e:
+            print(f"        [WARN] 两阶段扫描失败: {e}")
+            return None
+
+    def _full_block_scan(self, package_name: str, block_nodes: int = 250,
+                         max_blocks: int = 6, time_budget_s: float = 240):
         """包块划分：整包图按文件→函数分块，逐块读图找链（2026-11）。
 
         与投票路径的区别：
@@ -710,7 +1013,8 @@ class BatchAnalyzerV20Voting:
         - 这里每一块都读，粗筛（外部交互密度）只用于**预算排序**
         - 判决要求 verify_paths 通过的真实链，幻觉路径不升级
 
-        只在机械投票落在 SUSPICIOUS/UNKNOWN 时调用——成本只落在歧义区。
+        调用时机：歧义区（SUSPICIOUS/UNKNOWN）作为第二意见；大包作为
+        **主路径**（rule-only 投票没有语义判断，预算让给块划分）。
 
         Returns:
             analyze_package_graph 的结果 dict，失败返回 None
@@ -726,9 +1030,12 @@ class BatchAnalyzerV20Voting:
             from zhipuai import ZhipuAI
 
             client = ZhipuAI(api_key=self.api_key)
+            # 2026-11 时间预算（实测驱动）：只限块数挡不住"块本身很大"。
+            # 预算由调用方给定（歧义区 250/6/240s，大包 300/16/420s）。
             r = analyze_package_graph(
                 g['nodes'], g['edges'], client, self.llm_model,
-                samples=1, block_nodes=400, max_blocks=10)
+                samples=1, block_nodes=block_nodes, max_blocks=max_blocks,
+                time_budget_s=time_budget_s)
         except Exception as e:
             print(f"        [WARN] 包块划分失败: {e}")
             return None
@@ -948,11 +1255,21 @@ Output JSON:
         classifier = V12SubgraphClassifier(self.api_key, use_cache=self.use_llm_cache, model=self.llm_model)
 
         # ===== 改进1：子图优先级排序 =====
+        # 2026-11 大包快路径：子图数超限（ag2 1136 个）或全图节点超限时，
+        # 20 次 LLM 高优先级投票对 400 个子图是又贵又浅——直接全部
+        # rule-only，把预算交给块划分（验证链 + 单节点敌意字面量门）。
+        _is_large = (len(subgraph_jsons) > LARGE_PKG_SUBGRAPH_THRESHOLD
+                     or len((self._full_graph or {}).get('nodes') or [])
+                     > LARGE_PKG_NODE_THRESHOLD)
         print(f"\n        [改进1] 智能预处理（子图优先级排序）...")
         high_priority_subgraphs, low_priority_subgraphs = prioritizer.prioritize_subgraphs(
             subgraph_jsons,
-            max_llm_calls=20  # 限制LLM调用次数
+            max_llm_calls=0 if _is_large else 20
         )
+        if _is_large:
+            print(f"        [大包快路径] 子图 {len(subgraph_jsons)} / 节点 "
+                  f"{len((self._full_graph or {}).get('nodes') or [])} → "
+                  f"跳过高优 LLM 投票，预算交给块划分")
 
         # ===== 高优先级子图：规则评分 + LLM验证 或 直接LLM分析 =====
         if self.skip_rule_scoring:
@@ -1146,7 +1463,12 @@ Output JSON:
             escalation_reasons = []
             escalated_verdicts = []
             for v in suspicious_verdicts:
-                reason = escalation_gate(v.get('taint_chains'))
+                # 2026-11 目标感知：把子图节点传给门，EXFIL sink 按
+                # 目的地分层定罪（twirp/pyslack 类自有服务不再定罪）
+                reason = escalation_gate(
+                    v.get('taint_chains'),
+                    nodes=v.get('nodes') or None,
+                    project_dir=package_dir)
                 if reason:
                     escalation_reasons.append(f"{v.get('subgraph_name', '?')}: {reason}")
                     escalated_verdicts.append(v)
@@ -1614,8 +1936,70 @@ Output JSON:
         package_path = Path(package_dir)
 
         print(f"          [Step 2.1] 构建DDG V7...")
-        builder = DDGBuilderV7(package_dir)
-        result = builder.build()
+
+        # ===== 2026-11 SSO 接线（大包建图侧治本）=====
+        # extract_sso/select_files_for_graph 此前从未被调用——1093 文件的
+        # agent_framework 全量建图 CPU 40 分钟是 ANALYSIS_TIMEOUT 主因。
+        # 大包只对 SSO 选中的子集建图（Tier-1 永不裁剪，import 闭包与
+        # 长常量补偿保证链的起点不断）；小包全量，行为不变。
+        include_files = None
+        try:
+            _py_count = len([p for p in package_path.rglob('*.py')
+                             if '__pycache__' not in str(p)
+                             and '.ddg_output' not in str(p)])
+            if _py_count > LARGE_PKG_FILE_THRESHOLD:
+                from src.sso_extractor import extract_sso, select_files_for_graph
+                _t_sso = time.time()
+                sso = extract_sso(package_path)
+                include_files = select_files_for_graph(
+                    sso, max_files=120, project_dir=package_path)
+                print(f"          [SSO 粗筛] {_py_count} 个 .py → "
+                      f"建图 {len(include_files)} 个 "
+                      f"({time.time()-_t_sso:.1f}s, "
+                      f"module级 {sum(1 for f in sso.get('module_level_capabilities') or {})})")
+        except Exception as sso_err:
+            print(f"          [WARN] SSO 粗筛失败,回退全量建图: {sso_err}")
+            include_files = None
+
+        # ===== 2026-11 图后端选择 =====
+        # pyflow: 工业化前端（IFDS/别名/capability/覆盖度），秒级；
+        #         产出同形 result，下游零改动。
+        # builtin: 手写 DDG（默认，保持现网行为）。
+        result = None
+        if self.graph_backend == 'pyflow':
+            try:
+                from src import pyflow_backend
+                if pyflow_backend.available():
+                    _t_pf = time.time()
+                    result = pyflow_backend.build_result(
+                        package_dir,
+                        max_seconds=self.pyflow_max_seconds,
+                        capability_model=self.pyflow_capability_model)
+                    if result:
+                        print(f"          [PyFlow] {len(result['nodes'])} 节点 / "
+                              f"{len(result['edges'])} 边 "
+                              f"({time.time()-_t_pf:.1f}s, "
+                              f"coverage {result.get('coverage', {}).get('entries_analyzed', '?')}"
+                              f"/{result.get('coverage', {}).get('entries_total', '?')})")
+                    else:
+                        print("          [PyFlow] 无产出，回退 builtin")
+                else:
+                    print("          [PyFlow] 不可用（无 py3.10 venv），回退 builtin")
+            except Exception as _pf_err:
+                print(f"          [PyFlow] 异常，回退 builtin: {_pf_err}")
+                result = None
+
+        if result is None:
+            builder = DDGBuilderV7(package_dir, include_files=include_files)
+            result = builder.build()
+
+        # 2026-11 图后端元信息（覆盖度门控 + 审计用）
+        self._graph_backend = result.get('backend', 'builtin')
+        self._graph_coverage = result.get('coverage') or {}
+        self._graph_capabilities = result.get('capabilities') or {}
+        if result.get('execution_phases'):
+            self._graph_phases = result['execution_phases']
+            print(f"          [执行时机] {self._graph_phases}")
 
         # 输出结果目录（参考main.py lines 139-204）
         output_dir = package_path / '.ddg_output'
@@ -1706,7 +2090,9 @@ Output JSON:
                 verbose=False
             )
 
-            partitioner = GraphPartitioner(nx_graph, config)
+            # project_dir 传给良性上下文判定（版本惯用法需要读目标文件）
+            partitioner = GraphPartitioner(nx_graph, config,
+                                           project_dir=package_path)
 
             # 执行分割(2026-11: 函数级替代 WCC+BFS)
             subgraphs = partitioner.partition(method='function')
@@ -1751,21 +2137,24 @@ Output JSON:
 
         # 攻击链重建（从DDG节点/边重建 数据引入→处理→危险执行→外传 四阶段攻击链）
         print(f"          [Step 2.4] 重建攻击链（AttackChainRebuilder）...")
+        # 2026-11 修复：整图快照必须在 try 之前建立。此前它在 AttackChainRebuilder
+        # 的 try 块里赋值——rebuild 一旦抛异常（0 条边的包很常见），
+        # self._full_graph 永远是 None，块扫描"静默关闭"，而这些恰恰是
+        # 最需要 LLM 细看的小包（tlsshield 等 5 个降级案例全部命中）。
         try:
-            ac_nodes = [
+            _ac_nodes = [
                 {
                     'node_id': n.get_id(),
                     'code': n.source or '',
                     'type': n.type or '',
                     'line': n.line,
                     'file': n.file,
-                    # 2026-11 包块划分:函数归属用于 _split_blocks 的文件→函数切分
                     'function_name': getattr(n, 'function_name', None),
                     'class_name': getattr(n, 'class_name', None),
                 }
                 for n in (result.get('nodes') or {}).values()
             ]
-            ac_edges = [
+            _ac_edges = [
                 {
                     'from_node': e.from_node.get_id(),
                     'to_node': e.to_node.get_id(),
@@ -1775,8 +2164,14 @@ Output JSON:
                 }
                 for e in (result.get('edges') or [])
             ]
-            # 整图快照留给包块划分（只在歧义区用；子进程一包一进程，内存可控）
-            self._full_graph = {'nodes': ac_nodes, 'edges': ac_edges}
+            self._full_graph = {'nodes': _ac_nodes, 'edges': _ac_edges}
+        except Exception as _fg_err:
+            print(f"          [WARN] 整图快照失败: {_fg_err}")
+            self._full_graph = None
+
+        try:
+            ac_nodes = list((self._full_graph or {}).get('nodes') or [])
+            ac_edges = list((self._full_graph or {}).get('edges') or [])
             chain_result = AttackChainRebuilder().rebuild(ac_nodes, ac_edges)
 
             # 2026-10 分层 CPG-lite ②:函数摘要落盘
@@ -1942,7 +2337,7 @@ Output JSON:
         # 这里按块内节点集合分发给各子图，让跨函数链进得了 prompt。
         _global_chains = []
         _global_file = Path(package_dir) / '.ddg_output' / 'taint_chains.json'
-        if _global_file.exists():
+        if self.cross_scope and _global_file.exists():
             try:
                 _gdata = json.loads(_global_file.read_text(encoding='utf-8'))
                 _global_chains = _gdata.get('chains') or []
@@ -1964,7 +2359,7 @@ Output JSON:
                     # 2026-11 跨块边（可选；旧 .ddg_output 没有这个文件）
                     boundary_edges = {}
                     _be_file = subgraph_dir / 'boundary_edges.json'
-                    if _be_file.exists():
+                    if self.cross_scope and _be_file.exists():
                         try:
                             boundary_edges = json.loads(
                                 _be_file.read_text(encoding='utf-8'))
@@ -2789,6 +3184,24 @@ def main():
                         help='消融开关:registry 身份(404/未发布版本)不作为判决证据。'
                              '用于评估纯代码分析(图内核+LLM)不依赖联网时的检出能力。'
                              '仍会做核验并记录结果,只是不参与判决')
+    parser.add_argument('--graph-backend', default='builtin',
+                        choices=['builtin', 'pyflow'],
+                        help='图后端：builtin=手写DDG（默认），pyflow=PyFlow分析引擎')
+    parser.add_argument('--llm-pipeline', default='single',
+                        choices=['single', 'two_stage'],
+                        help='LLM 管道：single=现状，two_stage=小模型提链+大模型判定')
+    parser.add_argument('--llm-model-small', default='',
+                        help='两阶段 Stage1 小模型（默认回落到 --llm-model）')
+    parser.add_argument('--llm-model-big', default='',
+                        help='两阶段 Stage2 强模型（默认回落到 --llm-model）')
+    parser.add_argument('--pyflow-max-seconds', type=int, default=60,
+                        help='PyFlow 单命令时间预算（秒）')
+    parser.add_argument('--pyflow-capability-model', default='',
+                        help='PyFlow --capability-model 配置路径（我们的 PyPI 威胁模型）')
+    parser.add_argument('--coverage-max-skip', type=float, default=0.30,
+                        help='覆盖度门控阈值：跳过 entry 占比超过此值则不判 BENIGN')
+    parser.add_argument('--no-cross-scope', action='store_true',
+                        help='消融开关:关闭跨块边与全图链分发（量化跨作用域证据的增益）')
     parser.add_argument('--no-block-scan', action='store_true',
                         help='关闭包块划分（默认开启：投票落在 SUSPICIOUS 时'
                              '整包图按文件→函数分块逐块读，作为第二意见）')
@@ -2810,6 +3223,14 @@ def main():
         llm_model=args.llm_model,
         ignore_pypi_gate=args.no_pypi_gate,
         block_scan=not args.no_block_scan,
+        cross_scope=not args.no_cross_scope,
+        graph_backend=args.graph_backend,
+        llm_pipeline=args.llm_pipeline,
+        llm_model_small=args.llm_model_small,
+        llm_model_big=args.llm_model_big,
+        pyflow_max_seconds=args.pyflow_max_seconds,
+        pyflow_capability_model=args.pyflow_capability_model,
+        coverage_max_skip=args.coverage_max_skip,
     )
 
     analyzer.analyze_all()

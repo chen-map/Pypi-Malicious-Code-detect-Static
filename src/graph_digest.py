@@ -15,6 +15,7 @@
 验证配套见 llm_graph_analyst.verify_paths()。
 """
 import re
+from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 # 序列化时保留的边类型
@@ -35,6 +36,31 @@ _DATA_EDGE_KINDS = {'data', 'param', 'return', 'call', 'target'}
 _STRUCT_EDGE_KINDS = {'control'}          # 结构/控制边：仅用于 LLM 读图
 _ALL_EDGE_KINDS = _DATA_EDGE_KINDS | _STRUCT_EDGE_KINDS
 _MAX_CODE_CHARS = 110
+
+
+def any_hostile_literal(paths: List[Dict], nodes: List[Dict]) -> bool:
+    """块划分升级门（2026-11，google_re2 误升级驱动）。
+
+    verify_paths 只保证"边存在"——正则库 re2.compile 的调用链同样是
+    真实边，但语义是编译正则不是执行载荷。升级 MALICIOUS 的验证链
+    必须至少含一个敌意字面量节点（矿池/反弹 shell/编码命令…）。
+    """
+    by_id = {n.get('node_id'): (n.get('code') or '')
+             for n in nodes if n.get('node_id')}
+    from src.literal_decoder import scan_code, decoded_has_risk
+    for p in paths or []:
+        for nid in p.get('nodes') or []:
+            raw = by_id.get(nid) or ''
+            code = raw.lower()
+            if any(t in code for t in _LITERAL_RISK):
+                return True
+            # 2026-11 混淆补偿：载荷藏在编码字面量里时，解一层再判
+            for hit in scan_code(raw):
+                if hit.get('risky') or any(t in hit['decoded'].lower()
+                                           for t in _LITERAL_RISK):
+                    return True
+    return False
+
 
 
 def _looks_like_ast_dump(code: str) -> bool:
@@ -336,8 +362,10 @@ def digest(nodes: List[Dict], edges: List[Dict],
             _fixed = _source_line(n.get('file', ''), n.get('line', 0))
             if _fixed:
                 _code = _fixed
+        _esc = n.get('escape_to') or []
+        _esc_note = (f"  <<escapes via {', '.join(_esc[:2])}>>" if _esc else '')
         lines.append(f'{real_to_short[real]}  [{_node_type(n)}]  L{n.get("line", 0)}  '
-                     f'{_shorten(_code)}{scope}{_node_tags(n, show_danger)}')
+                     f'{_shorten(_code)}{scope}{_node_tags(n, show_danger)}{_esc_note}')
 
     lines.append('')
     lines.append('## EDGES  (format: A -kind[var]-> B, [X] = cross-file)  [data flow]')
@@ -407,6 +435,26 @@ def digest(nodes: List[Dict], edges: List[Dict],
         lines.append(f'{sa[1]} ({sa[0]})  =>  {sb[1]} ({sb[0]}){var_note}  via {a}->{b}')
     if not _seen_flow:
         lines.append('(none - all data stays within a single function)')
+
+    # ===== 逃逸点（2026-11）：数据离开可见范围 =====
+    # PyFlow 的 escape 事件：值通过 return/argument 逃到边界。边建不了
+    # （边界常是库函数），但这条信息很重要——"链断了"和"链出了视野"是
+    # 两件事。LLM 据此不该把"后面没有边"当成"没问题"。
+    _esc_nodes = [n for n in ordered if n.get('escape_to')]
+    if _esc_nodes:
+        lines.append('')
+        lines.append('## ESCAPE POINTS  (values leaving the visible scope)')
+        for n in _esc_nodes[:6]:
+            real = n.get('node_id')
+            short = real_to_short.get(real)
+            if not short:
+                continue
+            kinds = ','.join(n.get('escape_kind') or [])
+            lines.append(f"  {short} L{n.get('line', 0)} "
+                         f"-> {', '.join((n.get('escape_to') or [])[:3])}"
+                         f"  [{kinds}]")
+        lines.append('  (data continues outside this block — absence of an '
+                     'edge here is NOT evidence of safety)')
 
     # ===== 跨块边（2026-11 划分越界修复）=====
     # 分块分析时块内边是诱导子图，跨函数/跨文件的边不在里面。这里单独
@@ -483,7 +531,30 @@ def digest(nodes: List[Dict], edges: List[Dict],
     # 矿池/反弹 shell IP/载荷 URL/编码串散落在各节点截断代码里；
     # 集中成表让模型把"基础设施 + 执行点"一眼关联。
     iocs = _extract_iocs(_selected)
-    if any(v for v in iocs.values() if v):
+
+    # 2026-11 单层自动解码（混淆盲区）：把编码字面量解开一层，
+    # 解出的内容既进 IOC 扫描也单独展示——quarejma-botnet 那类
+    # "载荷全在 base64 里"的包，不解码就等于没看见。
+    decoded_hits = []
+    try:
+        from src.literal_decoder import scan_code, decoded_has_risk
+        for n in _selected:
+            code = n.get('code') or ''
+            if _looks_like_ast_dump(code):
+                code = _source_line(n.get('file', ''), n.get('line', 0)) or code
+            for hit in scan_code(code):
+                hit['file'] = n.get('file', '')
+                hit['line'] = n.get('line', 0)
+                hit['risky'] = decoded_has_risk(hit['decoded'])
+                decoded_hits.append(hit)
+                if len(decoded_hits) >= 8:
+                    break
+            if len(decoded_hits) >= 8:
+                break
+    except Exception:
+        decoded_hits = []
+
+    if any(v for v in iocs.values() if v) or decoded_hits:
         lines.append('')
         lines.append('## SUSPICIOUS LITERALS  (endpoints / payloads found in code)')
         _ioc_label = {'ip_endpoint': 'IP:endpoint', 'url': 'URL',
@@ -493,6 +564,11 @@ def digest(nodes: List[Dict], edges: List[Dict],
             if not vals:
                 continue
             lines.append(f'  {_ioc_label.get(kind, kind)}: ' + ' | '.join(vals[:6]))
+        for h in decoded_hits:
+            flag = '  <<HOSTILE CONTENT>>' if h['risky'] else ''
+            lines.append(f"  decoded-{h['method']}: "
+                         f"{h['decoded'][:110]!r}{flag}"
+                         f"   (from {Path(h['file']).name}:{h['line']})")
         lines.append('If a LITERAL above appears near an execution sink, '
                      'name it explicitly in why_malicious.')
 

