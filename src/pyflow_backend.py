@@ -228,43 +228,92 @@ def _stmt_of(stmt: Dict) -> Dict:
     }
 
 
-def _build_file_index(project_dir: Path) -> Dict[str, str]:
-    """点分模块名 → 绝对路径。
+def _build_file_index(project_dir: Path):
+    """三层索引，解决 PyFlow unit_id 的三种形态。
 
-    PyFlow 的 GIR 语句不带 filename，但每条都有 unit_id，形如
-    `ab100.pkgs_C_mal.blypack-0.2.setup.<module>`——即
-    `<相对路径的点分形式>.<qualname>`。这里建立反查索引。
+    PyFlow 的单元标识不一致（实测）：
+        requests.<module>            ← 模块级（不是 requests.__init__）
+        BaseAdapter.__init__          ← 类方法（**不带模块前缀**）
+        ab100.pkg.setup.<module>      ← 带路径的模块级
+
+    所以需要：
+        path_index     点分路径 → 文件（requests.__init__ → .../requests/__init__.py）
+        module_index   模块名   → 文件（requests → .../requests/__init__.py）
+        qualname_index 限定名   → 文件（BaseAdapter.__init__ → .../requests/adapters.py）
     """
-    idx: Dict[str, str] = {}
+    path_index: Dict[str, str] = {}
+    module_index: Dict[str, str] = {}
+    qualname_index: Dict[str, str] = {}
     root = Path(project_dir)
+
     for p in root.rglob('*.py'):
-        if '__pycache__' in str(p):
+        if '__pycache__' in str(p) or '.ddg_output' in str(p):
             continue
         try:
             rel = p.relative_to(root).with_suffix('')
         except ValueError:
             continue
         dotted = str(rel).replace(chr(92), '/').replace('/', '.')
-        idx[dotted] = str(p.resolve())
-    return idx
+        abs_path = str(p.resolve())
+        path_index[dotted] = abs_path
+        # 模块名：requests.__init__ → requests
+        mod = dotted[:-len('.__init__')] if dotted.endswith('.__init__') else dotted
+        module_index.setdefault(mod, abs_path)
+        # 限定名索引（AST 扫描，每文件毫秒级）
+        try:
+            import ast as _ast
+            tree = _ast.parse(p.read_text(encoding='utf-8', errors='ignore'))
+        except Exception:
+            continue
+        for node in tree.body:
+            if isinstance(node, _ast.ClassDef):
+                qualname_index.setdefault(node.name, abs_path)
+                for sub in node.body:
+                    if isinstance(sub, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                        qualname_index.setdefault(f'{node.name}.{sub.name}', abs_path)
+            elif isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                qualname_index.setdefault(node.name, abs_path)
+    return path_index, module_index, qualname_index
 
 
-def _resolve_unit_file(unit_id: str, file_index: Dict[str, str]):
-    """unit_id → (绝对路径, 函数名)。最长点分前缀匹配。"""
+def _resolve_unit_file(unit_id: str, index) -> Tuple[str, str]:
+    """unit_id → (绝对路径, 函数名)。三层回落：路径 → 模块 → 限定名。"""
+    path_index, module_index, qualname_index = index
     if not unit_id:
         return '', '<module>'
+
+    # ① 模块级：xxx.<module> → 模块名查
+    if unit_id.endswith('.<module>'):
+        mod = unit_id[:-len('.<module>')]
+        if mod in module_index:
+            return module_index[mod], '<module>'
+        if mod in path_index:
+            return path_index[mod], '<module>'
+        # 带路径前缀的形态（ab100.pkg.setup）→ 取最长后缀匹配
+        parts = mod.split('.')
+        for i in range(len(parts)):
+            cand = '.'.join(parts[i:])
+            if cand in module_index:
+                return module_index[cand], '<module>'
+
+    # ② 点分路径前缀匹配（旧逻辑，处理带路径的 unit_id）
     best = ''
-    for dotted in file_index:
+    for dotted in path_index:
         if unit_id == dotted or unit_id.startswith(dotted + '.'):
             if len(dotted) > len(best):
                 best = dotted
-    if not best:
-        return '', '<module>'
-    rest = unit_id[len(best):].lstrip('.')
-    func = rest.split('.')[-1] if rest else '<module>'
-    if not func or '<module>' in func:
-        func = '<module>'
-    return file_index[best], func
+    if best:
+        rest = unit_id[len(best):].lstrip('.')
+        func = rest.split('.')[-1] if rest else '<module>'
+        return path_index[best], (func or '<module>')
+
+    # ③ 限定名回落（BaseAdapter.__init__ 这种裸名）
+    for cand in (unit_id, unit_id.split('.')[-1],
+                 '.'.join(unit_id.split('.')[-2:])):
+        if cand in qualname_index:
+            parts = unit_id.split('.')
+            return qualname_index[cand], (parts[-1] if len(parts) > 1 else '<module>')
+    return '', '<module>'
 
 
 def build_nodes(gir: Dict, caps: Dict, project_dir: Path,
@@ -279,7 +328,7 @@ def build_nodes(gir: Dict, caps: Dict, project_dir: Path,
     cap_by_loc, module_level_by_loc = merge_capabilities(
         caps, sso_result, project_dir)
 
-    file_index = _build_file_index(project_dir)
+    file_index = _build_file_index(project_dir)   # (path, module, qualname)
     nodes: List[Dict] = []
     seen: Set[str] = set()
     root = Path(project_dir)
