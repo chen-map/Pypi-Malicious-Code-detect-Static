@@ -129,9 +129,13 @@ try:
     check("__init__.py 顶层 → import",
           execution_phase({'file': str(pkg / '__init__.py'),
                            'function_name': '<module>'}, pkg) == 'import')
-    check("函数体内 → runtime",
+    # setup.py 内函数体也算安装期（cmdclass 钩子）
+    check("setup.py 函数体 → install",
           execution_phase({'file': abs_setup, 'function_name': 'run'}, pkg)
-          == 'runtime')
+          == 'install')
+    check("普通文件函数体 → runtime",
+          execution_phase({'file': str(pkg / 'core.py'),
+                           'function_name': 'run'}, pkg) == 'runtime')
 finally:
     shutil.rmtree(root, ignore_errors=True)
 

@@ -19,6 +19,11 @@ from typing import Dict, List, Optional, Set
 
 # 数据进入点（不可信来源）
 SOURCE_PATTERNS = [
+    # 2026-11 凭据文件是强源（ssc-concurrent-log-handler：
+    # open(~/.kube/config) + open(~/.ssh/id_rsa) → base64 → curl POST）
+    (r'\.ssh/|id_rsa|\.aws/credentials|\.kube/config|\.netrc'
+     r'|\.pypirc|\.docker/config\.json|\.git-credentials'
+     r'|\.npmrc|\.config/gcloud', 'credentials'),
     (r'\bos\.environ\b', 'environment'),
     (r'\bos\.getenv\s*\(', 'environment'),
     (r'\bsys\.argv\b', 'cli_args'),
@@ -138,7 +143,7 @@ SOURCE_PRIORITY = {cat: rank for rank, cat in enumerate([
 # environment/file_read→exec 是构建工具的日常形态，不参与自动升级
 # （仍可由包级 LLM 聚合基于完整上下文升级）。
 STRONG_SOURCES = {'network_response', 'socket_recv', 'deserialization',
-                  'decoded_data', 'hardcoded_payload'}
+                  'decoded_data', 'hardcoded_payload', 'credentials'}
 EXFIL_SINKS = {'data_exfiltration'}
 
 # 2026-11 升级门收紧（500+500 四个网络客户端误报驱动）：

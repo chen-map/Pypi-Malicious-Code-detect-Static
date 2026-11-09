@@ -73,8 +73,12 @@ check("setup.py 顶层 → install",
       phase_of(True, '/x/setup.py', '<module>') == 'install')
 check("__init__.py 顶层 → import",
       phase_of(True, '/x/pkg/__init__.py', '<module>') == 'import')
-check("setup.py 函数内 → runtime",
-      phase_of(False, '/x/setup.py', 'run') == 'runtime')
+# 2026-11 变更：setup.py 里任何代码都是安装期执行（cmdclass 钩子把载荷
+# 放在类方法里，按"函数体=runtime"会完全错过 PyPI 主攻击面）
+check("setup.py 函数内 → install（cmdclass 钩子）",
+      phase_of(False, '/x/setup.py', 'run') == 'install')
+check("普通模块函数内 → runtime",
+      phase_of(False, '/x/pkg/core.py', 'run') == 'runtime')
 check("module_level 缺失时回落文件名",
       phase_of(None, '/x/setup.py', None) == 'install')
 

@@ -143,7 +143,12 @@ def phase_of(module_level: Optional[bool], filename: str,
     is_top = module_level if module_level is not None else (
         func_name in (None, '', '<module>'))
     name = Path(filename).name
-    if is_top and name in ('setup.py', 'conftest.py'):
+    # 2026-11：setup.py 里**任何**代码都是安装期执行——包括函数体。
+    # 真实样本用 cmdclass={'install_scripts': Cls} 把载荷放在类方法里，
+    # 按"函数体=runtime"判定会完全错过这个 PyPI 主攻击面。
+    if name == 'setup.py':
+        return 'install'
+    if is_top and name == 'conftest.py':
         return 'install'
     if is_top and name == '__init__.py':
         return 'import'
